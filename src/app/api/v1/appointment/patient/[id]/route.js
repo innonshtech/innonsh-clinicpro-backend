@@ -8,7 +8,7 @@ import * as appointmentController from '@/controllers/appointmentController';
  * /api/v1/appointment/patient/{id}:
  *   get:
  *     summary: Fetch appointment history for a specific patient
- *     description: Returns a sorted list of all appointments for a patient. Roles: admin, receptionist, doctor.
+ *     description: "Returns a sorted list of all appointments for a patient. Roles: admin, receptionist, doctor."
  *     tags: [Appointment]
  *     security:
  *       - bearerAuth: []
