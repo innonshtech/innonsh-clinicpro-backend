@@ -1,7 +1,7 @@
 import { NextResponse } from 'next/server';
 
 // Configurable allowed origins via env
-const ALLOWED_ORIGINS = (process.env.ALLOWED_ORIGINS || 'http://localhost:3000')
+const ALLOWED_ORIGINS = (process.env.ALLOWED_ORIGINS || 'http://localhost:3000,https://innonsh-clinicpro-frontend.vercel.app')
   .split(',')
   .map((o) => o.trim());
 
