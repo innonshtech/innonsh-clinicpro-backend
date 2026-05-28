@@ -1,0 +1,119 @@
+[2026-04-20T08:57:37.415Z] Fetching slots for Doctor: 69e3b2411bfff34671846e73, Date: 2026-04-20 (Monday), Clinic: 69e39c0a1bfff34671846da8
+[2026-04-20T08:57:37.463Z] No working days defined for Rohit, defaulting to Mon-Fri
+[2026-04-20T08:57:37.487Z] Booked slots found: []
+[2026-04-20T09:00:38.631Z] Fetching slots for Doctor: 69e3b1581bfff34671846e0a, Date: 2026-04-20 (Monday), Clinic: 69e39c0a1bfff34671846da8
+[2026-04-20T09:00:38.690Z] No working days defined for mayur, defaulting to Mon-Fri
+[2026-04-20T09:00:38.713Z] Booked slots found: []
+[2026-04-20T09:03:51.676Z] Fetching slots for Doctor: 69e3b1581bfff34671846e0a, Date: 2026-04-20 (Monday), Clinic: 69e39c0a1bfff34671846da8
+[2026-04-20T09:03:51.741Z] No working days defined for mayur, defaulting to Mon-Fri
+[2026-04-20T09:03:51.757Z] Booked slots found: []
+[2026-04-20T09:04:06.125Z] Fetching slots for Doctor: 69e3b2411bfff34671846e73, Date: 2026-04-20 (Monday), Clinic: 69e39c0a1bfff34671846da8
+[2026-04-20T09:04:06.162Z] No working days defined for Rohit, defaulting to Mon-Fri
+[2026-04-20T09:04:06.176Z] Booked slots found: []
+[2026-04-20T09:14:13.557Z] Fetching slots for Doctor: 69e3b1581bfff34671846e0a, Date: 2026-04-20 (Monday), Clinic: 69e39c0a1bfff34671846da8
+[2026-04-20T09:14:13.617Z] No working days defined for mayur, defaulting to Mon-Fri
+[2026-04-20T09:14:13.637Z] Booked slots found: []
+[2026-04-20T09:14:50.876Z] Fetching slots for Doctor: 69e3b1581bfff34671846e0a, Date: 2026-04-20 (Monday), Clinic: 69e39c0a1bfff34671846da8
+[2026-04-20T09:14:50.927Z] No working days defined for mayur, defaulting to Mon-Fri
+[2026-04-20T09:14:50.944Z] Booked slots found: []
+[2026-04-20T10:38:55.029Z] Fetching slots for Doctor: 69e3b1581bfff34671846e0a, Date: 2026-04-20 (Monday), Clinic: 69e39c0a1bfff34671846da8
+[2026-04-20T10:38:55.167Z] No working days defined for mayur, defaulting to Mon-Fri
+[2026-04-20T10:38:55.180Z] Booked slots found: []
+[2026-04-21T05:12:22.326Z] Fetching slots for Doctor: 69e3b2411bfff34671846e73, Date: 2026-04-21 (Tuesday), Clinic: 69e39c0a1bfff34671846da8
+[2026-04-21T05:12:22.392Z] No working days defined for Rohit, defaulting to Mon-Fri
+[2026-04-21T05:12:22.423Z] Booked slots found: []
+[2026-04-21T05:15:15.720Z] Fetching slots for Doctor: 69e3b2411bfff34671846e73, Date: 2026-04-21 (Tuesday), Clinic: 69e39c0a1bfff34671846da8
+[2026-04-21T05:15:15.762Z] No working days defined for Rohit, defaulting to Mon-Fri
+[2026-04-21T05:15:15.778Z] Booked slots found: []
+[2026-04-21T05:17:53.793Z] Fetching slots for Doctor: 69e3b2411bfff34671846e73, Date: 2026-04-21 (Tuesday), Clinic: 69e39c0a1bfff34671846da8
+[2026-04-21T05:17:53.837Z] No working days defined for Rohit, defaulting to Mon-Fri
+[2026-04-21T05:17:53.854Z] Booked slots found: []
+[2026-04-22T07:08:40.274Z] Fetching slots for Doctor: 69e3b2411bfff34671846e73, Date: 2026-04-22 (Wednesday), Clinic: 69e39c0a1bfff34671846da8
+[2026-04-22T07:08:40.340Z] No working days defined for Rohit, defaulting to Mon-Fri
+[2026-04-22T07:08:40.355Z] Booked slots found: []
+[2026-04-22T09:52:36.669Z] Fetching slots for Doctor: 69e3b2411bfff34671846e73, Date: 2026-04-22 (Wednesday), Clinic: 69e39c0a1bfff34671846da8
+[2026-04-22T09:52:36.744Z] No working days defined for Rohit, defaulting to Mon-Fri
+[2026-04-22T09:52:36.759Z] Booked slots found: []
+[2026-04-23T11:01:12.090Z] Fetching slots for Doctor: 69e3b2411bfff34671846e73, Date: 2026-04-23 (Thursday), Clinic: 69e39c0a1bfff34671846da8
+[2026-04-23T11:01:12.135Z] No working days defined for Rohit, defaulting to Mon-Fri
+[2026-04-23T11:01:12.152Z] Booked slots found: []
+[2026-04-23T11:09:59.237Z] Fetching slots for Doctor: 69e3b2411bfff34671846e73, Date: 2026-04-23 (Thursday), Clinic: 69e39c0a1bfff34671846da8
+[2026-04-23T11:09:59.276Z] No working days defined for Rohit, defaulting to Mon-Fri
+[2026-04-23T11:09:59.294Z] Booked slots found: []
+[2026-04-24T06:50:35.679Z] Fetching slots for Doctor: 69e3b1581bfff34671846e0a, Date: 2026-04-24 (Friday), Clinic: 69e39c0a1bfff34671846da8
+[2026-04-24T06:50:35.734Z] No working days defined for mayur, defaulting to Mon-Fri
+[2026-04-24T06:50:35.753Z] Booked slots found: []
+[2026-04-24T06:53:53.287Z] Fetching slots for Doctor: 69e07658fb082785558c40e8, Date: 2026-04-24 (Friday), Clinic: 69e39c0a1bfff34671846da8
+[2026-04-24T06:53:53.345Z] Booked slots found: []
+[2026-04-24T06:54:03.995Z] Fetching slots for Doctor: 69e07658fb082785558c40e8, Date: 2026-04-25 (Saturday), Clinic: 69e39c0a1bfff34671846da8
+[2026-04-24T06:54:04.033Z] Doctor Test not scheduled for Saturday
+[2026-04-24T06:54:06.058Z] Fetching slots for Doctor: 69e07658fb082785558c40e8, Date: 2026-04-24 (Friday), Clinic: 69e39c0a1bfff34671846da8
+[2026-04-24T06:54:06.110Z] Booked slots found: []
+[2026-04-24T06:54:07.698Z] Fetching slots for Doctor: 69e3b2411bfff34671846e73, Date: 2026-04-24 (Friday), Clinic: 69e39c0a1bfff34671846da8
+[2026-04-24T06:54:07.733Z] No working days defined for Rohit, defaulting to Mon-Fri
+[2026-04-24T06:54:07.746Z] Booked slots found: []
+[2026-04-24T07:19:22.717Z] Fetching slots for Doctor: 69e3b2411bfff34671846e73, Date: 2026-04-24 (Friday), Clinic: 69e39c0a1bfff34671846da8
+[2026-04-24T07:19:22.763Z] No working days defined for Rohit, defaulting to Mon-Fri
+[2026-04-24T07:19:22.776Z] Booked slots found: []
+[2026-04-24T07:20:51.318Z] Fetching slots for Doctor: 69e3b2411bfff34671846e73, Date: 2026-04-24 (Friday), Clinic: 69e39c0a1bfff34671846da8
+[2026-04-24T07:20:51.354Z] No working days defined for Rohit, defaulting to Mon-Fri
+[2026-04-24T07:20:51.368Z] Booked slots found: []
+[2026-04-24T07:23:36.532Z] Fetching slots for Doctor: 69e3b2411bfff34671846e73, Date: 2026-04-24 (Friday), Clinic: 69e39c0a1bfff34671846da8
+[2026-04-24T07:23:36.571Z] No working days defined for Rohit, defaulting to Mon-Fri
+[2026-04-24T07:23:36.584Z] Booked slots found: []
+[2026-04-28T06:15:26.990Z] Fetching slots for Doctor: 69e3b2411bfff34671846e73, Date: 2026-04-28 (Tuesday), Clinic: 69e39c0a1bfff34671846da8
+[2026-04-28T06:15:27.005Z] Doctor is on leave for 2026-04-28
+[2026-04-28T06:15:34.857Z] Fetching slots for Doctor: 69e3b2411bfff34671846e73, Date: 2026-04-29 (Wednesday), Clinic: 69e39c0a1bfff34671846da8
+[2026-04-28T06:15:34.898Z] No working days defined for Rohit, defaulting to Mon-Fri
+[2026-04-28T06:15:34.914Z] Booked slots found: []
+[2026-04-28T06:15:43.526Z] Fetching slots for Doctor: 69e3b2411bfff34671846e73, Date: 2026-04-30 (Thursday), Clinic: 69e39c0a1bfff34671846da8
+[2026-04-28T06:15:43.567Z] No working days defined for Rohit, defaulting to Mon-Fri
+[2026-04-28T06:15:43.580Z] Booked slots found: []
+[2026-04-28T06:16:02.158Z] Fetching slots for Doctor: 69e3b2411bfff34671846e73, Date: 2026-04-30 (Thursday), Clinic: 69e39c0a1bfff34671846da8
+[2026-04-28T06:16:02.198Z] No working days defined for Rohit, defaulting to Mon-Fri
+[2026-04-28T06:16:02.213Z] Booked slots found: []
+[2026-04-28T06:17:29.016Z] Fetching slots for Doctor: 69e3b2411bfff34671846e73, Date: 2026-04-30 (Thursday), Clinic: 69e39c0a1bfff34671846da8
+[2026-04-28T06:17:29.055Z] No working days defined for Rohit, defaulting to Mon-Fri
+[2026-04-28T06:17:29.071Z] Booked slots found: []
+[2026-05-12T05:42:57.804Z] Fetching slots for Doctor: 69e3b2411bfff34671846e73, Date: 2026-05-14 (Thursday), Clinic: 69e39c0a1bfff34671846da8
+[2026-05-12T05:42:57.856Z] No working days defined for Rohit, defaulting to Mon-Fri
+[2026-05-12T05:42:57.874Z] Booked slots found: []
+[2026-05-21T09:41:58.543Z] Fetching slots for Doctor: 69e3b1581bfff34671846e0a, Date: 2026-04-20 (Monday), Clinic: 69e39c0a1bfff34671846da8
+[2026-05-21T09:41:58.591Z] No working days defined for mayur, defaulting to Mon-Fri
+[2026-05-21T09:41:58.609Z] Booked slots found: []
+[2026-05-21T11:21:56.167Z] Fetching slots for Doctor: 69e3b2411bfff34671846e73, Date: 2026-05-21 (Thursday), Clinic: 69e39c0a1bfff34671846da8
+[2026-05-21T11:21:56.213Z] No working days defined for Rohit, defaulting to Mon-Fri
+[2026-05-21T11:21:56.229Z] Booked slots found: []
+[2026-05-21T11:22:06.064Z] Fetching slots for Doctor: 69e3b2411bfff34671846e73, Date: 2026-05-21 (Thursday), Clinic: 69e39c0a1bfff34671846da8
+[2026-05-21T11:22:06.106Z] No working days defined for Rohit, defaulting to Mon-Fri
+[2026-05-21T11:22:06.120Z] Booked slots found: []
+[2026-05-25T06:54:08.344Z] Fetching slots for Doctor: 69e3b2411bfff34671846e73, Date: 2026-05-25 (Monday), Clinic: 69e39c0a1bfff34671846da8
+[2026-05-25T06:54:08.398Z] No working days defined for Rohit, defaulting to Mon-Fri
+[2026-05-25T06:54:08.414Z] Booked slots found: []
+[2026-05-25T08:47:05.972Z] Fetching slots for Doctor: 69e3b2411bfff34671846e73, Date: 2026-05-25 (Monday), Clinic: 69e39c0a1bfff34671846da8
+[2026-05-25T08:47:06.017Z] No working days defined for Rohit, defaulting to Mon-Fri
+[2026-05-25T08:47:06.033Z] Booked slots found: []
+[2026-05-25T08:47:55.363Z] Fetching slots for Doctor: 69e3b2411bfff34671846e73, Date: 2026-05-25 (Monday), Clinic: 69e39c0a1bfff34671846da8
+[2026-05-25T08:47:55.398Z] No working days defined for Rohit, defaulting to Mon-Fri
+[2026-05-25T08:47:55.410Z] Booked slots found: []
+[2026-05-26T09:23:37.895Z] Fetching slots for Doctor: 69e3b2411bfff34671846e73, Date: 2026-05-26 (Tuesday), Clinic: 69e39c0a1bfff34671846da8
+[2026-05-26T09:23:37.946Z] No working days defined for Rohit, defaulting to Mon-Fri
+[2026-05-26T09:23:37.965Z] Booked slots found: []
+[2026-05-26T09:24:55.724Z] Fetching slots for Doctor: 69fc6f0185f9d5322715d656, Date: 2026-05-27 (Wednesday), Clinic: 69e39c0a1bfff34671846da8
+[2026-05-26T09:24:55.770Z] Doctor Smith not scheduled for Wednesday
+[2026-05-26T09:24:59.769Z] Fetching slots for Doctor: 69fc6f0185f9d5322715d656, Date: 2026-05-26 (Tuesday), Clinic: 69e39c0a1bfff34671846da8
+[2026-05-26T09:24:59.821Z] Booked slots found: []
+[2026-05-26T09:25:05.809Z] Fetching slots for Doctor: 69fc6f0185f9d5322715d656, Date: 2026-05-28 (Thursday), Clinic: 69e39c0a1bfff34671846da8
+[2026-05-26T09:25:05.855Z] Doctor Smith not scheduled for Thursday
+[2026-05-26T09:25:09.424Z] Fetching slots for Doctor: 69e3b2411bfff34671846e73, Date: 2026-05-28 (Thursday), Clinic: 69e39c0a1bfff34671846da8
+[2026-05-26T09:25:09.481Z] No working days defined for Rohit, defaulting to Mon-Fri
+[2026-05-26T09:25:09.495Z] Booked slots found: []
+[2026-05-26T09:25:13.957Z] Fetching slots for Doctor: 69e3b2411bfff34671846e73, Date: 2026-05-27 (Wednesday), Clinic: 69e39c0a1bfff34671846da8
+[2026-05-26T09:25:13.999Z] No working days defined for Rohit, defaulting to Mon-Fri
+[2026-05-26T09:25:14.014Z] Booked slots found: []
+[2026-05-26T09:25:17.726Z] Fetching slots for Doctor: 69e3b2411bfff34671846e73, Date: 2026-05-26 (Tuesday), Clinic: 69e39c0a1bfff34671846da8
+[2026-05-26T09:25:17.777Z] No working days defined for Rohit, defaulting to Mon-Fri
+[2026-05-26T09:25:17.794Z] Booked slots found: []
+[2026-05-26T09:29:39.819Z] Fetching slots for Doctor: 69e3b2411bfff34671846e73, Date: 2026-05-26 (Tuesday), Clinic: 69e39c0a1bfff34671846da8
+[2026-05-26T09:29:39.868Z] No working days defined for Rohit, defaulting to Mon-Fri
+[2026-05-26T09:29:39.889Z] Booked slots found: []
