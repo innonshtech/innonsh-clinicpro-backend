@@ -6,7 +6,7 @@ import { ApiResponse } from '@/utils/apiResponse';
  * GET /api/v1/billing/:id
  * Fetches details of a specific invoice
  */
-export const GET = withRoles(['doctor', 'receptionist', 'admin', 'patient'])(async (req, { params }) => {
+export const GET = withRoles(['doctor', 'receptionist', 'admin', 'patient'], async (req, { params }) => {
   try {
     return await billingController.getInvoice(req, { params });
   } catch (error) {
