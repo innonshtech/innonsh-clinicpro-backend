@@ -1,5 +1,6 @@
 const mongoose = require('mongoose');
-const uri = "mongodb+srv://xpertance:XPERTANCE@cluster0.dnv2io.mongodb.net/Doctor_ERP?retryWrites=true&w=majority";
+require('dotenv').config({ path: require('path').join(__dirname, '../.env') });
+const uri = process.env.MONGODB_URI;
 
 async function test() {
   console.log("Testing connection...");

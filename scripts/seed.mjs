@@ -74,35 +74,35 @@ async function seed() {
     console.log('✅ Connected to MongoDB');
 
     // ── 1. Create Super Admin ──
-    const existingAdmin = await Admin.findOne({ email: 'admin@healthbyte.com' });
+    const existingAdmin = await Admin.findOne({ email: 'admin@clinicpro.com' });
     if (existingAdmin) {
       console.log('⚠️  Admin already exists, skipping...');
     } else {
       const hashedPassword = await bcrypt.hash('Admin@123', 10);
       await Admin.create({
         name: 'Super Admin',
-        email: 'admin@healthbyte.com',
+        email: 'admin@clinicpro.com',
         password: hashedPassword,
         role: 'admin',
       });
       console.log('✅ Admin created:');
-      console.log('   Email:    admin@healthbyte.com');
+      console.log('   Email:    admin@clinicpro.com');
       console.log('   Password: Admin@123');
     }
 
     // ── 2. Create a Clinic (approved) ──
-    const existingClinic = await Clinic.findOne({ email: 'clinic@healthbyte.com' });
+    const existingClinic = await Clinic.findOne({ email: 'clinic@clinicpro.com' });
     if (existingClinic) {
       console.log('⚠️  Clinic already exists, skipping...');
     } else {
       await Clinic.create({
-        clinicName: 'HealthByte Medical Center',
+        clinicName: 'ClinicPro Medical Center',
         clinicType: 'multispecialty',
         description: 'A full-service multispecialty clinic providing comprehensive healthcare.',
         registrationNumber: 'HB-CLINIC-001',
         taxId: 'GSTIN12345678',
         specialties: ['General Medicine', 'Cardiology', 'Dermatology', 'Pediatrics'],
-        email: 'clinic@healthbyte.com',
+        email: 'clinic@clinicpro.com',
         phone: '9876543210',
         password: 'Clinic@123',
         address: '123 Main Street',
@@ -124,14 +124,14 @@ async function seed() {
         },
       });
       console.log('✅ Clinic created:');
-      console.log('   Email:    clinic@healthbyte.com');
+      console.log('   Email:    clinic@clinicpro.com');
       console.log('   Password: Clinic@123');
     }
 
     console.log('\n🎉 Seeding complete!');
     console.log('━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━');
-    console.log('  Admin Login:  admin@healthbyte.com / Admin@123');
-    console.log('  Clinic Login: clinic@healthbyte.com / Clinic@123');
+    console.log('  Admin Login:  admin@clinicpro.com / Admin@123');
+    console.log('  Clinic Login: clinic@clinicpro.com / Clinic@123');
     console.log('━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━');
 
   } catch (err) {
