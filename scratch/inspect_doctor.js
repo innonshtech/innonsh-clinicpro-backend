@@ -1,8 +1,8 @@
 const mongoose = require('mongoose');
 const path = require('path');
 
-// Mocking the environment for the script
-const DB_URI = "mongodb+srv://drazp3112:tshY7Dk06Y3p5S5k@cluster0.p78ru.mongodb.net/Doctor_ERP?retryWrites=true&w=majority&appName=Cluster0";
+require('dotenv').config({ path: path.join(__dirname, '../.env') });
+const DB_URI = process.env.MONGODB_URI;
 
 async function checkDoctor() {
   try {
