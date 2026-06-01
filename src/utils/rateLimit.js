@@ -1,55 +1,66 @@
-// Simple in-memory rate limiter for Next.js API routes
-const rateLimitMap = new Map();
+import RateLimit from '@/models/RateLimit';
+import dbConnect from '@/utils/db';
 
 /**
- * Rate limiter function
+ * DB-backed Rate limiter function
  * @param {string} ip - Client IP address
- * @param {Object} options - { limit: number, windowMs: number }
- * @returns {Object} - { success: boolean, remaining: number, reset: number }
+ * @param {Object} options - { limit: number, windowMs: number, endpoint: string }
+ * @returns {Promise<Object>} - { success: boolean, remaining: number, reset: number }
  */
-export const rateLimit = (ip, options = { limit: 100, windowMs: 15 * 60 * 1000 }) => {
-  const now = Date.now();
-  const windowStart = now - options.windowMs;
+export const rateLimit = async (ip, options = { limit: 100, windowMs: 15 * 60 * 1000, endpoint: 'global' }) => {
+  await dbConnect();
   
-  let userRequests = rateLimitMap.get(ip) || [];
+  const now = new Date();
   
-  // Filter requests within the current window
-  userRequests = userRequests.filter(timestamp => timestamp > windowStart);
+  // Find or create the rate limit document
+  let record = await RateLimit.findOne({ ip, endpoint: options.endpoint });
   
-  if (userRequests.length >= options.limit) {
-    const oldestRequest = userRequests[0];
-    const resetTime = oldestRequest + options.windowMs;
-    
+  if (!record) {
+    record = new RateLimit({
+      ip,
+      endpoint: options.endpoint,
+      hits: 1,
+      expiresAt: new Date(now.getTime() + options.windowMs)
+    });
+    await record.save();
+    return {
+      success: true,
+      limit: options.limit,
+      remaining: options.limit - 1,
+      reset: record.expiresAt.getTime()
+    };
+  }
+
+  // If expired, reset it (though MongoDB TTL should handle this eventually)
+  if (now > record.expiresAt) {
+    record.hits = 1;
+    record.expiresAt = new Date(now.getTime() + options.windowMs);
+    await record.save();
+    return {
+      success: true,
+      limit: options.limit,
+      remaining: options.limit - 1,
+      reset: record.expiresAt.getTime()
+    };
+  }
+
+  // Increment hits
+  record.hits += 1;
+  await record.save();
+
+  if (record.hits > options.limit) {
     return {
       success: false,
       limit: options.limit,
       remaining: 0,
-      reset: resetTime
+      reset: record.expiresAt.getTime()
     };
   }
-  
-  userRequests.push(now);
-  rateLimitMap.set(ip, userRequests);
-  
+
   return {
     success: true,
     limit: options.limit,
-    remaining: options.limit - userRequests.length,
-    reset: now + options.windowMs
+    remaining: options.limit - record.hits,
+    reset: record.expiresAt.getTime()
   };
 };
-
-// Cleanup stale entries every 15 minutes to prevent memory leaks
-if (typeof setInterval !== 'undefined') {
-  setInterval(() => {
-    const now = Date.now();
-    for (const [ip, requests] of rateLimitMap.entries()) {
-      const activeRequests = requests.filter(ts => ts > now - 60 * 60 * 1000); // Keep 1 hour of history
-      if (activeRequests.length === 0) {
-        rateLimitMap.delete(ip);
-      } else {
-        rateLimitMap.set(ip, activeRequests);
-      }
-    }
-  }, 15 * 60 * 1000);
-}

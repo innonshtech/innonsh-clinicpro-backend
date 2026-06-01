@@ -38,5 +38,18 @@ const doctorSchema = new mongoose.Schema({
   availableDays: [{ type: String }],
   availableTime: { type: String }
 }, { timestamps: true });
+
+import mongooseFieldEncryption from 'mongoose-field-encryption';
+const { fieldEncryption } = mongooseFieldEncryption;
+
+// Apply Field-Level Encryption for Doctor PII
+doctorSchema.plugin(fieldEncryption, { 
+  fields: ['homeAddress', 'identityProof', 'licenseNumber', 'degreeCertificate'], 
+  secret: process.env.ENCRYPTION_KEY || 'default_fallback_secret_32bytes_!!',
+  saltGenerator: function (secret) {
+    return "1234567890123456"; // 16 bytes of salt
+  }
+});
+
 // Ensure any existing model is replaced to apply new schema
 export default mongoose.models.Doctor || mongoose.model("Doctor", doctorSchema);

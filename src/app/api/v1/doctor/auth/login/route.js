@@ -35,11 +35,23 @@ export async function POST(req) {
       return ApiResponse.error("Invalid password", "INVALID_PASSWORD", [], 401);
     }
 
-    const token = generateToken(user, user.role);
+    const tokens = generateToken(user, user.role);
 
+    // Create session in DB
+    const { default: Session } = await import('@/models/Session');
+    const ip = req.headers.get('x-forwarded-for') || '127.0.0.1';
+    const device = req.headers.get('user-agent') || 'unknown';
+    await Session.create({
+      userId: user._id,
+      userRole: user.role,
+      refreshToken: tokens.refreshToken,
+      ipAddress: ip,
+      device: device,
+      expiresAt: new Date(Date.now() + 7 * 24 * 60 * 60 * 1000) // 7 days
+    });
 
-    return ApiResponse.success({
-      token,
+    const response = ApiResponse.success({
+      token: tokens.accessToken,
       user: {
         id: user._id,
         name: `${user.firstName} ${user.lastName}`,
@@ -47,6 +59,16 @@ export async function POST(req) {
         role: user.role,
       },
     }, "Login successful");
+
+    response.cookies.set('refreshToken', tokens.refreshToken, {
+      httpOnly: true,
+      secure: process.env.NODE_ENV === 'production',
+      sameSite: 'strict',
+      path: '/',
+      maxAge: 7 * 24 * 60 * 60, // 7 days
+    });
+
+    return response;
   } catch (error) {
     console.error("Doctor login error:", error);
     return ApiResponse.error("Internal Server Error", "SERVER_ERROR", error.message, 500);

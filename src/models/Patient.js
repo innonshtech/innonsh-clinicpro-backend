@@ -101,6 +101,18 @@ patientSchema.index({ clinicId: 1, patientId: 1 });
 // 4. Text index for broad search (optional but powerful)
 patientSchema.index({ firstName: 'text', lastName: 'text', phoneNumber: 'text', patientId: 'text' });
 
+import mongooseFieldEncryption from 'mongoose-field-encryption';
+const { fieldEncryption } = mongooseFieldEncryption;
+
+// Apply Field-Level Encryption for PHI (Protected Health Information)
+patientSchema.plugin(fieldEncryption, { 
+  fields: ['medicalHistory', 'allergies', 'currentMedications', 'symptoms'], 
+  secret: process.env.ENCRYPTION_KEY || 'default_fallback_secret_32bytes_!!',
+  saltGenerator: function (secret) {
+    return "1234567890123456"; // 16 bytes of salt
+  }
+});
+
 // Add any extra schema-level indexes here if needed
 
 export default mongoose.models.Patient || mongoose.model("Patient", patientSchema);

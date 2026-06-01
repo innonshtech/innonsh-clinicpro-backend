@@ -31,7 +31,7 @@ if (!JWT_SECRET) {
 export const POST = withErrorHandler(async (req) => {
   const ip = req.headers.get('x-forwarded-for') || '127.0.0.1';
   const isDev = process.env.NODE_ENV === 'development';
-  const limiter = rateLimit(ip, { limit: isDev ? 100 : 10, windowMs: 15 * 60 * 1000 });
+  const limiter = await rateLimit(ip, { limit: isDev ? 100 : 10, windowMs: 15 * 60 * 1000, endpoint: 'onelogin' });
   
   if (!limiter.success) {
     return ApiResponse.error(
@@ -166,18 +166,38 @@ export const POST = withErrorHandler(async (req) => {
   }
 
   try {
-    const token = generateToken(
+    const tokens = generateToken(
       user, 
       user.role || type, 
       type === ROLES.CLINIC ? user._id.toString() : user.clinicId
     );
 
+    // Create session in DB
+    const { default: Session } = await import('@/models/Session');
+    const device = req.headers.get('user-agent') || 'unknown';
+    await Session.create({
+      userId: user._id,
+      userRole: user.role || type,
+      refreshToken: tokens.refreshToken,
+      ipAddress: ip,
+      device: device,
+      expiresAt: new Date(Date.now() + 7 * 24 * 60 * 60 * 1000) // 7 days
+    });
 
-
-    return ApiResponse.success({
-      token,
+    const response = ApiResponse.success({
+      token: tokens.accessToken,
       user: format(user),
     }, 'Login successful');
+
+    response.cookies.set('refreshToken', tokens.refreshToken, {
+      httpOnly: true,
+      secure: process.env.NODE_ENV === 'production',
+      sameSite: 'strict',
+      path: '/',
+      maxAge: 7 * 24 * 60 * 60, // 7 days
+    });
+
+    return response;
   } catch (err) {
     console.error('[LOGIN ERROR] Failed to finalize login:', err);
     return ApiResponse.error(`Finalization error: ${err.message}`, 'FINALIZATION_ERROR', err.stack, 500);

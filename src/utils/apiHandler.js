@@ -1,4 +1,5 @@
 import { ApiResponse } from '@/utils/apiResponse';
+import { sanitizeData } from '@/utils/sanitizer';
 
 /**
  * Higher Order Function that wraps a Next.js App Router API route handler.
@@ -11,6 +12,15 @@ import { ApiResponse } from '@/utils/apiResponse';
 export function withErrorHandler(handler) {
   return async (req, context) => {
     try {
+      // Monkey-patch req.json to intercept and sanitize request bodies globally
+      if (typeof req.json === 'function') {
+        const originalJson = req.json.bind(req);
+        req.json = async () => {
+          const rawData = await originalJson();
+          return sanitizeData(rawData);
+        };
+      }
+
       return await handler(req, context);
     } catch (error) {
       console.error(`[API ERROR] ${req.method} ${req.url} ->`, error);

@@ -14,7 +14,9 @@ export const patientRegistrationSchema = z.object({
   gender: z.string().min(1, 'Gender is required'),
   bloodGroup: z.string().optional().nullable().or(z.literal('')),
   emergencyContact: z.string().optional().nullable().or(z.literal('')),
-  password: z.string().min(8, 'Password must be at least 8 characters long'),
+  password: z.string()
+    .min(8, 'Password must be at least 8 characters long')
+    .regex(/^(?=.*[a-z])(?=.*[A-Z])(?=.*\d)(?=.*[@$!%*?&])[A-Za-z\d@$!%*?&]{8,}$/, 'Password must contain at least one uppercase letter, one lowercase letter, one number, and one special character'),
   address: z.string().optional().nullable().or(z.literal('')),
   city: z.string().optional().nullable().or(z.literal('')),
   state: z.string().optional().nullable().or(z.literal('')),
@@ -47,7 +49,9 @@ export const doctorRegistrationSchema = z.object({
   dateOfBirth: z.string().optional().nullable().or(z.literal('')),
   gender: z.string().optional().nullable().or(z.literal('')),
   email: z.string().email('Invalid email format'),
-  password: z.string().min(8, 'Password must be at least 8 characters long'),
+  password: z.string()
+    .min(8, 'Password must be at least 8 characters long')
+    .regex(/^(?=.*[a-z])(?=.*[A-Z])(?=.*\d)(?=.*[@$!%*?&])[A-Za-z\d@$!%*?&]{8,}$/, 'Password must contain at least one uppercase letter, one lowercase letter, one number, and one special character'),
   phone: z.string().optional().nullable().or(z.literal('')),
   specialty: z.string().optional().nullable().or(z.literal('')),
   experience: z.number().optional().nullable().or(z.string().optional()).transform(val => Number(val) || 0),
@@ -77,7 +81,9 @@ export const clinicRegistrationSchema = z.object({
   registrationNumber: z.string().optional().nullable().or(z.literal('')),
   taxId: z.string().optional().nullable().or(z.literal('')),
   email: z.string().email('Invalid email format'),
-  password: z.string().min(8, 'Password must be at least 8 characters long'),
+  password: z.string()
+    .min(8, 'Password must be at least 8 characters long')
+    .regex(/^(?=.*[a-z])(?=.*[A-Z])(?=.*\d)(?=.*[@$!%*?&])[A-Za-z\d@$!%*?&]{8,}$/, 'Password must contain at least one uppercase letter, one lowercase letter, one number, and one special character'),
   phone: z.string().optional().nullable().or(z.literal('')),
   
   description: z.string().optional(),
