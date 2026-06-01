@@ -50,10 +50,13 @@ import * as appointmentController from '@/controllers/appointmentController';
  *         description: Slot occupied
  */
 export const PUT = withErrorHandler(
-  withRoles(['admin', 'receptionist', 'doctor'], async (req, { params }) => {
+  withRoles(['admin', 'receptionist', 'doctor'], async (req, context) => {
+    // Await context.params since it's a Promise in Next.js 15+
+    const params = await context.params;
+    
     // Standardize params for the controller
-    const context = { params: { id: params.id } };
-    return await appointmentController.rescheduleAppointment(req, context);
+    const controllerContext = { params: Promise.resolve({ id: params.id }) };
+    return await appointmentController.rescheduleAppointment(req, controllerContext);
   })
 );
 

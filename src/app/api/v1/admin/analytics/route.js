@@ -5,8 +5,9 @@ import Patient from '@/models/Patient';
 import Doctor from '@/models/Doctor';
 import Appointments from '@/models/Appointments';
 import Billing from '@/models/Billing';
+import { withRoles } from '@/utils/authGuard';
 
-export async function GET() {
+export const GET = withRoles(['admin'], async (req) => {
   try {
     await dbConnect();
 
@@ -114,4 +115,4 @@ export async function GET() {
     console.error('Analytics Error:', error);
     return ApiResponse.error('Internal Server Error', 'ANALYTICS_ERROR', error.message, 500);
   }
-}
+});
