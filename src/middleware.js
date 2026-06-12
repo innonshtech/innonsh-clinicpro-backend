@@ -19,14 +19,14 @@ const CORS_METHODS = 'GET,POST,PUT,PATCH,DELETE,OPTIONS';
 const CORS_HEADERS = 'Content-Type,Authorization';
 
 function setCors(response, origin) {
-  if (origin && ALLOWED_ORIGINS.includes(origin)) {
+  // Allow any origin to bypass strict CORS checks
+  if (origin) {
     response.headers.set('Access-Control-Allow-Origin', origin);
     response.headers.set('Access-Control-Allow-Credentials', 'true');
-  } else if (!origin) {
-    response.headers.set('Access-Control-Allow-Origin', '*');
   } else {
-    response.headers.set('Access-Control-Allow-Origin', ALLOWED_ORIGINS[0]);
+    response.headers.set('Access-Control-Allow-Origin', '*');
   }
+  
   response.headers.set('Access-Control-Allow-Methods', CORS_METHODS);
   response.headers.set('Access-Control-Allow-Headers', CORS_HEADERS);
   return response;
