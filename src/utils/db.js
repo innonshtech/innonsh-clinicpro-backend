@@ -1,6 +1,7 @@
 import mongoose from "mongoose";
 import Patient from '../models/Patient';
 import Counter from '../models/Counter';
+import auditPlugin from './mongooseAuditPlugin';
 
 const MONGODB_URI = process.env.MONGODB_URI;
 
@@ -54,6 +55,8 @@ async function dbConnect() {
     const opts = {
       bufferCommands: false,
     };
+
+    mongoose.plugin(auditPlugin);
 
     cached.promise = mongoose.connect(MONGODB_URI, opts).then((mongoose) => {
       console.log("✅ MongoDB connected successfully");

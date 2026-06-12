@@ -1,13 +1,5 @@
-import jwt from 'jsonwebtoken';
 import { ApiResponse } from './apiResponse';
-
-const JWT_SECRET = process.env.JWT_SECRET;
-
-if (!JWT_SECRET) {
-  throw new Error('[AUTH ERROR] JWT_SECRET is not defined in environment variables.');
-}
-
-
+import logger from './logger';
 
 /**
  * Role-Based Access Control (RBAC) Higher-Order Function.
@@ -20,69 +12,43 @@ if (!JWT_SECRET) {
 export function withRoles(allowedRoles, handler) {
   return async (req, context) => {
     try {
-      // 1. Extract Bearer token from Authorization header
-      const authHeader = req.headers.get('authorization');
+      // Middleware has already verified the token and injected headers.
+      const userId = req.headers.get('x-user-id');
+      const userRole = req.headers.get('x-user-role');
+      const clinicId = req.headers.get('x-user-clinic-id');
 
-
-      if (!authHeader || !authHeader.startsWith('Bearer ')) {
-
+      if (!userId || !userRole) {
+        // If the headers are missing, either it's a public route or something went wrong.
+        // If this route is protected, middleware should have blocked it.
+        // We will fallback to 401 just in case.
         return ApiResponse.error(
-          'Missing or invalid authorization header',
-          'MISSING_TOKEN',
+          'Missing or invalid authorization context from middleware',
+          'MISSING_CONTEXT',
           [],
           401
         );
       }
 
-      const token = authHeader.split(' ')[1];
+      req.user = { id: userId, _id: userId, role: userRole, clinicId: clinicId };
 
-
-      // 2. Verify token
-      let decoded;
-      try {
-        decoded = jwt.verify(token.trim(), JWT_SECRET);
-
-      } catch (error) {
-
-        return ApiResponse.error(
-          'Token verification failed or expired',
-          'INVALID_TOKEN',
-          error.message,
-          401
-        );
-      }
-
-      // 3. Enforce RBAC Role Check
-      if (!decoded.role) {
-        return ApiResponse.error(
-          'User role is undefined',
-          'UNDEFINED_ROLE',
-          [],
-          403
-        );
-      }
-
-      // Support situations where allowedRoles might be empty/null (meaning just logged in is enough) 
-      // or strictly matching the allowed list.
+      // Double check RBAC if allowedRoles is provided, though middleware should have handled it globally.
       if (allowedRoles && allowedRoles.length > 0) {
-        const userRole = decoded.role.toLowerCase();
+        const userRoleLower = userRole.toLowerCase();
         const normalizedAllowedRoles = allowedRoles.map(r => r.toLowerCase());
 
-        if (!normalizedAllowedRoles.includes(userRole)) {
+        if (!normalizedAllowedRoles.includes(userRoleLower)) {
+          logger.warn(`Security Event: Access Denied for User ID ${userId}. Expected ${allowedRoles.join(', ')} but got ${userRole}`);
           return ApiResponse.error(
             `Access Denied. Required roles: ${allowedRoles.join(', ')}`,
             'FORBIDDEN',
-            { yourRole: decoded.role },
+            { yourRole: userRole },
             403
           );
         }
       }
 
-      // 4. Inject decoded user data into the request object's context
-      req.user = decoded;
-
     } catch (error) {
-      console.error('RBAC Authorization Error:', error);
+      logger.error('RBAC Authorization Error in authGuard:', { message: error.message, stack: error.stack });
       return ApiResponse.error(
         'Internal Server Authorization Error',
         'AUTH_ERROR',
@@ -92,7 +58,7 @@ export function withRoles(allowedRoles, handler) {
     }
 
     // Proceed to the original handler with an authorized request
-    // We call this OUTSIDE the authorization try-catch so we don't mask handler errors
     return await handler(req, context);
   };
 }
+
