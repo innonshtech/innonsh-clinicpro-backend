@@ -24,7 +24,15 @@ export async function POST(req) {
     
     if (refreshToken) {
       // Invalidate the session in the database
-      await Session.findOneAndUpdate({ refreshToken }, { isActive: false });
+      await Session.findOneAndUpdate(
+        { 
+          $or: [
+            { refreshToken: refreshToken },
+            { usedRefreshTokens: refreshToken }
+          ] 
+        }, 
+        { isActive: false }
+      );
     }
     
     const response = ApiResponse.success(null, "Logged out successfully");

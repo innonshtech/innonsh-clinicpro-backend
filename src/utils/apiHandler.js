@@ -1,5 +1,7 @@
 import { ApiResponse } from '@/utils/apiResponse';
 import { sanitizeData } from '@/utils/sanitizer';
+import logger from '@/utils/logger';
+import { requestContext } from '@/utils/asyncContext';
 
 /**
  * Higher Order Function that wraps a Next.js App Router API route handler.
@@ -21,9 +23,19 @@ export function withErrorHandler(handler) {
         };
       }
 
-      return await handler(req, context);
+      const state = {
+        userId: req.headers.get('x-user-id'),
+        userRole: req.headers.get('x-user-role'),
+        ipAddress: req.headers.get('x-forwarded-for') || '127.0.0.1',
+        method: req.method,
+        url: req.url,
+      };
+
+      return await requestContext.run(state, async () => {
+        return await handler(req, context);
+      });
     } catch (error) {
-      console.error(`[API ERROR] ${req.method} ${req.url} ->`, error);
+      logger.error(`[API ERROR] ${req.method} ${req.url} ->`, { message: error.message, stack: error.stack });
 
       // Handle Zod validation errors globally if we ever throw them
       if (error.name === 'ZodError') {

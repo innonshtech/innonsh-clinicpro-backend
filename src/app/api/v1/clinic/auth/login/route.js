@@ -66,18 +66,8 @@ export async function POST(req) {
 
     const tokens = generateToken(user, user.role || role, clinicId);
 
-    // Create session in DB
-    const { default: Session } = await import('@/models/Session');
-    const ip = req.headers.get('x-forwarded-for') || '127.0.0.1';
-    const device = req.headers.get('user-agent') || 'unknown';
-    await Session.create({
-      userId: user._id,
-      userRole: user.role || role,
-      refreshToken: tokens.refreshToken,
-      ipAddress: ip,
-      device: device,
-      expiresAt: new Date(Date.now() + 7 * 24 * 60 * 60 * 1000) // 7 days
-    });
+    const { createSession } = await import('@/utils/sessionHelper');
+    await createSession(req, user, tokens);
 
     const response = ApiResponse.success({
       token: tokens.accessToken,

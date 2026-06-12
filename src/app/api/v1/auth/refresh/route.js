@@ -45,10 +45,29 @@ export async function POST(req) {
       return ApiResponse.error("Invalid or expired refresh token", "INVALID_TOKEN", [], 401);
     }
     
-    // Check if session exists in DB
-    const session = await Session.findOne({ refreshToken, isActive: true });
+    // Check if session exists in DB (either active token or used token)
+    const session = await Session.findOne({ 
+      $or: [
+        { refreshToken: refreshToken },
+        { usedRefreshTokens: refreshToken }
+      ]
+    });
+
     if (!session) {
-      return ApiResponse.error("Session not found or revoked", "SESSION_REVOKED", [], 401);
+      return ApiResponse.error("Session not found", "SESSION_NOT_FOUND", [], 401);
+    }
+
+    // Token reuse detection: if the presented token is in the used list
+    if (session.usedRefreshTokens.includes(refreshToken)) {
+      // The session is compromised. Revoke it immediately.
+      session.isActive = false;
+      await session.save();
+      return ApiResponse.error("Token reuse detected, session revoked", "SESSION_REVOKED", [], 401);
+    }
+
+    // If the token is the current active token but the session is inactive
+    if (!session.isActive) {
+      return ApiResponse.error("Session revoked", "SESSION_REVOKED", [], 401);
     }
     
     // Fetch user depending on role
@@ -67,9 +86,13 @@ export async function POST(req) {
     // Generate new tokens (rotation)
     const tokens = generateToken(user, role, decoded.clinicId);
     
+    // Move the current token to the used list
+    session.usedRefreshTokens.push(session.refreshToken);
+
     // Update session with new refresh token
     session.refreshToken = tokens.refreshToken;
     session.expiresAt = new Date(Date.now() + 7 * 24 * 60 * 60 * 1000);
+    session.lastActivityAt = Date.now();
     await session.save();
     
     const response = ApiResponse.success({
