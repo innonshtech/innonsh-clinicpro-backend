@@ -12,17 +12,12 @@ const alertFormat = winston.format((info) => {
   return info;
 });
 
-const logger = winston.createLogger({
-  level: process.env.LOG_LEVEL || 'info',
-  format: combine(
-    alertFormat(),
-    timestamp({
-      format: 'YYYY-MM-DD HH:mm:ss',
-    }),
-    json() // JSON format for easy ingestion by Datadog, Splunk, ElasticSearch, etc.
-  ),
-  transports: [
-    new winston.transports.Console(),
+const transportsList = [new winston.transports.Console()];
+
+// Only write to local log files if NOT running on Vercel/Production
+// Vercel has a read-only filesystem (EROFS) and captures console logs automatically
+if (process.env.NODE_ENV !== 'production' && !process.env.VERCEL) {
+  transportsList.push(
     new winston.transports.DailyRotateFile({
       filename: 'logs/application-%DATE%.log',
       datePattern: 'YYYY-MM-DD',
@@ -36,7 +31,19 @@ const logger = winston.createLogger({
       maxSize: '20m',
       maxFiles: '30d',
     })
-  ],
+  );
+}
+
+const logger = winston.createLogger({
+  level: process.env.LOG_LEVEL || 'info',
+  format: combine(
+    alertFormat(),
+    timestamp({
+      format: 'YYYY-MM-DD HH:mm:ss',
+    }),
+    json() // JSON format for easy ingestion by Datadog, Splunk, ElasticSearch, etc.
+  ),
+  transports: transportsList,
 });
 
 export default logger;
