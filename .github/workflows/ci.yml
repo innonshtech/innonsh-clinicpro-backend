@@ -34,3 +34,8 @@ jobs:
         JWT_SECRET: "dummy_secret"
         JWT_REFRESH_SECRET: "dummy_secret"
         BACKUP_ENCRYPTION_KEY: "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
+        ALLOWED_ORIGINS: "http://localhost:3000"
+        SMTP_HOST: "dummy_host"
+        SMTP_PORT: "587"
+        SMTP_USER: "dummy_user"
+        SMTP_PASS: "dummy_pass"
