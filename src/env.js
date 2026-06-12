@@ -12,11 +12,17 @@ const envSchema = z.object({
   SMTP_PASS: z.string().min(1, "SMTP_PASS is required"),
 });
 
+const isBuild = process.env.npm_lifecycle_event === 'build' || process.env.SKIP_ENV_VALIDATION === 'true';
+
 const envParsed = envSchema.safeParse(process.env);
 
-if (!envParsed.success) {
+if (!envParsed.success && !isBuild) {
   console.error("❌ Invalid backend environment variables:\n", JSON.stringify(envParsed.error.format(), null, 2));
   throw new Error("Invalid environment variables");
 }
 
-export const env = envParsed.data;
+if (!envParsed.success && isBuild) {
+  console.warn("⚠️ Warning: Invalid environment variables detected during build. Bypassing validation because this is a build step.");
+}
+
+export const env = envParsed.success ? envParsed.data : process.env;
