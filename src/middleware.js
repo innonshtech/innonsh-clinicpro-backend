@@ -44,7 +44,14 @@ const PUBLIC_PATHS = [
   '/otp',
   '/verify',
   '/send',
-  '/upload'
+  '/upload',
+  '/check-email',
+  '/api/v1/clinic/fetch-by-id',
+  '/api/v1/doctor/fetch-by-id',
+  '/api/v1/clinic/fetch-doctor-clinicid',
+  '/api/v1/doctor/fetchall',
+  '/api/v1/clinic/fetch-images',
+  '/api/v1/doctor/availability'
 ];
 
 const ROLE_PATHS = {
