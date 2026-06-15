@@ -23,7 +23,7 @@
     "next-swagger-doc": "^0.4.1",
     "react": "^19.0.0",
     "react-dom": "^19.0.0",
-    "swagger-ui-react": "^5.32.2",
+    "swagger-ui-react": "^5.32.6",
     "ua-parser-js": "^2.0.10",
     "winston": "^3.19.0",
     "winston-daily-rotate-file": "^5.0.0",
