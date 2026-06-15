@@ -22,7 +22,7 @@
     "next": "^16.2.4",
     "next-swagger-doc": "^0.4.1",
     "react": "^19.0.0",
-    "react-dom": "^19.0.0",
+    "react-dom": "^19.2.7",
     "swagger-ui-react": "^5.32.2",
     "ua-parser-js": "^2.0.10",
     "winston": "^3.19.0",
