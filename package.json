@@ -19,7 +19,7 @@
     "mongo-sanitize": "^1.1.0",
     "mongoose": "^8.15.1",
     "mongoose-field-encryption": "^7.0.1",
-    "next": "^16.2.4",
+    "next": "^16.2.9",
     "next-swagger-doc": "^0.4.1",
     "react": "^19.0.0",
     "react-dom": "^19.0.0",
