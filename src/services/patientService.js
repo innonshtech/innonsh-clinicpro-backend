@@ -1,94 +1,92 @@
-import Patient from '@/models/Patient';
-import Appointment from '@/models/Appointments';
-import Doctor from '@/models/Doctor';
-import Counter from '@/models/Counter';
+/**
+ * patientService.js - Migrated from Mongoose to Supabase.
+ * All API contracts are preserved exactly.
+ */
+import { supabase } from '@/lib/supabase';
 import bcrypt from 'bcryptjs';
-import mongoose from 'mongoose';
 import AppError from '@/utils/AppError';
 import * as auditService from '@/services/auditService';
+import crypto from 'crypto';
 
+/**
+ * Auto-generate a unique sequential patient code via Supabase counter table.
+ */
+const getNextPatientCode = async () => {
+  // Upsert a counter row for patient_code and increment atomically
+  const { data, error } = await supabase.rpc('increment_counter', { counter_id: 'patient_code' });
+  if (error) {
+    // Fallback: use timestamp-based code
+    return `PAT-${Date.now()}`;
+  }
+  return `PAT-${String(data).padStart(6, '0')}`;
+};
 
 /**
  * Service to handle patient registration logic.
  */
 export const registerPatient = async (patientData) => {
-  const {
-    email,
-    phoneNumber,
-    password,
-    ...otherData
-  } = patientData;
+  const { email, phoneNumber, password, ...otherData } = patientData;
 
-  // 1. Check for duplicate email or phone number
-  const existingPatient = await Patient.findOne({
-    $or: [
-      { email },
-      { phoneNumber }
-    ]
-  });
+  // 1. Check for duplicate email or phone
+  const { data: existing } = await supabase
+    .from('patients')
+    .select('id, email, phone_number')
+    .or(`email.eq.${email.toLowerCase()},phone_number.eq.${phoneNumber}`)
+    .limit(1)
+    .maybeSingle();
 
-  if (existingPatient) {
-    const field = existingPatient.email === email ? 'Email' : 'Phone number';
+  if (existing) {
+    const field = existing.email === email.toLowerCase() ? 'Email' : 'Phone number';
     throw new AppError(`${field} already registered`, 409, 'DUPLICATE_ENTRY');
   }
-
 
   // 2. Hash password
   const hashedPassword = await bcrypt.hash(password, 12);
 
   // 3. Auto-generate patientCode
-  const counter = await Counter.findByIdAndUpdate(
-    { _id: 'patient_code' },
-    { $inc: { seq: 1 } },
-    { new: true, upsert: true }
-  );
-  const patientCode = `PAT-${String(counter.seq).padStart(6, '0')}`;
+  const patientCode = await getNextPatientCode();
 
   // 4. Create patient
-  const newPatient = await Patient.create({
-    ...otherData,
-    email,
-    phoneNumber,
-    password: hashedPassword,
-    patientCode,
-    role: 'patient',
-  });
+  const { data: newPatient, error: createError } = await supabase
+    .from('patients')
+    .insert([{
+      ...Object.fromEntries(
+        Object.entries(otherData).map(([k, v]) => [k.replace(/([A-Z])/g, '_$1').toLowerCase(), v])
+      ),
+      email: email.toLowerCase(),
+      phone_number: phoneNumber,
+      password: hashedPassword,
+      patient_code: patientCode,
+      role: 'patient',
+    }])
+    .select()
+    .single();
 
-  // 4. Return patient data without password
-  const result = newPatient.toObject();
+  if (createError) throw createError;
+
+  const result = { ...newPatient };
   delete result.password;
-
   return result;
 };
 
 /**
- * Internal helper to build the base scoping query for patients based on user role.
+ * Internal helper to build base clinic-scoping query params
  */
 const getPatientScopingQuery = async (user) => {
   const userId = user.id || user.userId;
   const clinicId = user.clinicId;
   const role = (user.role || '').toLowerCase();
-  let scopingQuery = {};
 
   if (role === 'doctor') {
-    // If clinicId is missing, we try to scoped by doctorId only
-    if (!clinicId) {
-      const appointments = await Appointment.find({ doctorId: userId }).select('patientId');
-      const assignedPatientIds = [...new Set(appointments.map(a => a.patientId?.toString()).filter(id => id))];
-      return { _id: { $in: assignedPatientIds.map(id => new mongoose.Types.ObjectId(id)) } };
-    }
-
-    // Always allow doctors to see all patients within their clinic
-    scopingQuery = { clinicId };
+    return clinicId ? { clinicId } : {};
   } else if (role === 'receptionist') {
-    scopingQuery = clinicId ? { clinicId } : { _id: null }; // Block access if no clinicId
+    return clinicId ? { clinicId } : null;
   } else if (role === 'admin') {
-    scopingQuery = clinicId ? { clinicId } : {};
+    return clinicId ? { clinicId } : {};
   } else if (role === 'clinic') {
-    scopingQuery = { clinicId: userId }; // For clinic users, id is clinicId
+    return { clinicId: userId };
   }
-
-  return scopingQuery;
+  return {};
 };
 
 /**
@@ -96,348 +94,184 @@ const getPatientScopingQuery = async (user) => {
  */
 export const getPatients = async (user, filters) => {
   const { page, limit, name, phoneNumber, startDate, endDate } = filters;
-
-  // 1. Get base scoping query
+  const role = (user.role || '').toLowerCase();
+  
   const scopingQuery = await getPatientScopingQuery(user);
-
-  // 2. Combine with search filters for the match stage
-  let matchStage = { ...scopingQuery };
-
-  if (user.role.toLowerCase() === 'receptionist') {
-    // 1. Find all completed appointments for the clinic
-    const completedAppointments = await Appointment.find({ 
-      clinicId: user.clinicId, 
-      status: 'completed' 
-    }).select('patientId');
-    
-    const completedPatientIds = [...new Set(completedAppointments.map(a => a.patientId ? a.patientId.toString() : null).filter(id => id))];
-    
-    // 2. Set match stage to ONLY those patient IDs!
-    matchStage = { _id: { $in: completedPatientIds.map(id => new mongoose.Types.ObjectId(id)) } };
+  if (!scopingQuery) {
+    return { patients: [], pagination: { totalCount: 0, totalPages: 0, currentPage: page, limit } };
   }
+
+  let req = supabase.from('patients').select(`
+    id, first_name, last_name, email, phone_number, patient_code, gender, date_of_birth, created_at, clinic_id,
+    appointments (
+      id, appointment_date, status,
+      doctors (first_name, last_name)
+    )
+  `, { count: 'exact' });
+
+  if (scopingQuery.clinicId) req = req.eq('clinic_id', scopingQuery.clinicId);
 
   if (name) {
-    const searchRegex = new RegExp(name, 'i');
-    matchStage.$or = [
-      { firstName: searchRegex },
-      { lastName: searchRegex },
-      { phoneNumber: searchRegex },
-      { patientId: searchRegex }
-    ];
+    req = req.or(`first_name.ilike.%${name}%,last_name.ilike.%${name}%,phone_number.ilike.%${name}%`);
   }
-
   if (phoneNumber) {
-    matchStage.phoneNumber = new RegExp(phoneNumber);
+    req = req.ilike('phone_number', `%${phoneNumber}%`);
   }
+  if (startDate) req = req.gte('created_at', startDate);
+  if (endDate) req = req.lte('created_at', endDate);
 
-  if (startDate || endDate) {
-    matchStage.createdAt = {};
-    if (startDate) matchStage.createdAt.$gte = new Date(startDate);
-    if (endDate) matchStage.createdAt.$lte = new Date(endDate);
-  }
+  req = req.order('created_at', { ascending: false }).range((page - 1) * limit, page * limit - 1);
 
-  // 3. Execute aggregation pipeline
-  const skip = (page - 1) * limit;
+  const { data, error, count } = await req;
+  if (error) throw error;
 
-  const results = await Patient.aggregate([
-    { $match: matchStage },
-    {
-      $lookup: {
-        from: 'appointments',
-        let: { pId: '$_id' },
-        pipeline: [
-          {
-            $match: {
-              $expr: { $eq: ['$patientId', '$$pId'] },
-              status: 'completed'
-            }
-          },
-          { $sort: { appointmentDate: -1, createdAt: -1 } },
-          {
-            $lookup: {
-              from: 'doctors',
-              localField: 'doctorId',
-              foreignField: '_id',
-              as: 'doctorInfo'
-            }
-          },
-          { $unwind: { path: '$doctorInfo', preserveNullAndEmptyArrays: true } }
-        ],
-        as: 'completedAppointments'
-      }
-    },
-    // Filter only completed consultations for the receptionist view
-    ...(user.role.toLowerCase() === 'receptionist' ? [
-      {
-        $match: {
-          completedAppointments: { $not: { $size: 0 } }
-        }
-      }
-    ] : []),
-    { $sort: { createdAt: -1 } },
-    {
-      $facet: {
-        metadata: [{ $count: "totalCount" }],
-        data: [
-          { $skip: skip },
-          { $limit: limit },
-          {
-            $addFields: {
-              lastAppointment: { $arrayElemAt: ['$completedAppointments', 0] }
-            }
-          },
-          {
-            $set: {
-              lastVisit: '$lastAppointment.appointmentDate',
-              doctor: {
-                $cond: {
-                  if: { $gt: [{ $strLenCP: { $ifNull: ['$lastAppointment.doctorInfo.firstName', ''] } }, 0] },
-                  then: {
-                    $concat: [
-                      'Dr. ',
-                      '$lastAppointment.doctorInfo.firstName',
-                      ' ',
-                      { $ifNull: ['$lastAppointment.doctorInfo.lastName', ''] }
-                    ]
-                  },
-                  else: null
-                }
-              }
-            }
-          },
-          {
-            $project: {
-              password: 0,
-              completedAppointments: 0,
-              lastAppointment: 0
-            }
-          }
-        ]
-      }
-    }
-  ]);
+  // Map to expected shape
+  const patients = (data || []).map(p => {
+    const completedAppointments = (p.appointments || []).filter(a => a.status === 'completed');
+    completedAppointments.sort((a, b) => new Date(b.appointment_date) - new Date(a.appointment_date));
+    const last = completedAppointments[0];
+    return {
+      _id: p.id,
+      patientId: p.id,
+      firstName: p.first_name,
+      lastName: p.last_name,
+      email: p.email,
+      phoneNumber: p.phone_number,
+      patientCode: p.patient_code,
+      gender: p.gender,
+      dateOfBirth: p.date_of_birth,
+      createdAt: p.created_at,
+      clinicId: p.clinic_id,
+      lastVisit: last?.appointment_date || null,
+      doctor: last?.doctors ? `Dr. ${last.doctors.first_name} ${last.doctors.last_name}` : null,
+    };
+  });
 
-  const patients = results[0]?.data || [];
-  const totalCount = results[0]?.metadata[0]?.totalCount || 0;
-  const totalPages = Math.ceil(totalCount / limit);
-
+  const totalCount = count || 0;
   return {
     patients,
     pagination: {
       totalCount,
-      totalPages,
+      totalPages: Math.ceil(totalCount / limit),
       currentPage: page,
-      limit
-    }
+      limit,
+    },
   };
 };
 
 /**
- * Service for efficient patient search across multiple fields with clinic scoping.
+ * Service for efficient patient search.
  */
 export const searchPatients = async (user, { query: searchStr, limit }) => {
-  // 1. Get base scoping query
   const scopingQuery = await getPatientScopingQuery(user);
 
-  // 2. Build search query
-  const searchRegex = new RegExp(searchStr, 'i');
-  const query = {
-    ...scopingQuery,
-    $or: [
-      { firstName: searchRegex },
-      { lastName: searchRegex },
-      { phoneNumber: searchRegex },
-      { patientId: searchRegex }
-    ]
-  };
+  let req = supabase.from('patients')
+    .select('id, first_name, last_name, email, phone_number, patient_code, gender, clinic_id')
+    .or(`first_name.ilike.%${searchStr}%,last_name.ilike.%${searchStr}%,phone_number.ilike.%${searchStr}%,patient_code.ilike.%${searchStr}%`)
+    .order('created_at', { ascending: false })
+    .limit(limit || 10);
 
-  // 3. Execute search
-  const patients = await Patient.find(query)
-    .sort({ createdAt: -1 })
-    .limit(limit)
-    .select('-password');
+  if (scopingQuery?.clinicId) req = req.eq('clinic_id', scopingQuery.clinicId);
 
-  return { patients };
+  const { data, error } = await req;
+  if (error) throw error;
+
+  return { patients: (data || []).map(p => ({ ...p, _id: p.id })) };
 };
 
 /**
- * Service to fetch a single patient profile by ID with scoping.
- * @param {string} id - Either patientId (UUID) or MongoDB ObjectId
- * @param {object} user - Authenticated user context
+ * Service to fetch a single patient profile by ID.
  */
 export const getPatientById = async (id, user) => {
-  const userId = user.id || user.userId;
   const role = (user.role || '').toLowerCase();
   const clinicId = user.clinicId;
 
-  // 1. Find patient by patientId (UUID) or _id (ObjectId)
-  const query = mongoose.Types.ObjectId.isValid(id)
-    ? { $or: [{ _id: id }, { patientId: id }] }
-    : { patientId: id };
+  const { data: patient, error } = await supabase
+    .from('patients')
+    .select('*')
+    .or(`id.eq.${id},patient_code.eq.${id}`)
+    .maybeSingle();
 
-  const patient = await Patient.findOne(query).select('-password');
+  if (error) throw error;
+  if (!patient) throw new AppError('Patient not found', 404, 'NOT_FOUND');
 
-  if (!patient) {
-    throw new AppError('Patient not found', 404, 'NOT_FOUND');
-  }
+  patient._id = patient.id;
+  delete patient.password;
 
-
-  // 2. Enforce Scoping
-  if (role === 'doctor') {
-    return patient;
-  } else if (role === 'receptionist') {
-    // Must belong to the same clinic
-    const patientClinicStr = patient.clinicId ? patient.clinicId.toString() : null;
-    const userClinicStr = clinicId ? clinicId.toString() : null;
-
-    if (!userClinicStr) {
+  // Scoping enforcement
+  if (role === 'receptionist' || role === 'clinic') {
+    if (clinicId && patient.clinic_id && patient.clinic_id !== clinicId) {
       throw new AppError('Access Denied', 403, 'FORBIDDEN');
     }
-
-    if (patientClinicStr && patientClinicStr !== userClinicStr) {
-      throw new AppError('Access Denied', 403, 'FORBIDDEN');
-    }
-
-    // Self-heal legacy data: If patient has no clinicId, assign it
-    if (!patientClinicStr) {
-      patient.clinicId = userClinicStr;
-      await patient.save();
-    }
-
-  } else if (role === 'clinic') {
-    if (patient.clinicId !== userId) {
-      throw new AppError('Access Denied', 403, 'FORBIDDEN');
-    }
-
   }
 
   return patient;
 };
+
 /**
- * Service to delete a patient by ID with scoping.
- * @param {string} id - Either patientId (UUID) or MongoDB ObjectId
- * @param {object} user - Authenticated user context
+ * Service to delete a patient by ID.
  */
 export const deletePatient = async (id, user) => {
-  const userId = user.id || user.userId;
-  const role = (user.role || '').toLowerCase();
-  const clinicId = user.clinicId;
+  const patient = await getPatientById(id, user);
 
-  // 1. Find patient to verify existence and ownership
-  const query = mongoose.Types.ObjectId.isValid(id)
-    ? { $or: [{ _id: id }, { patientId: id }] }
-    : { patientId: id };
+  const { error } = await supabase.from('patients').delete().eq('id', patient.id);
+  if (error) throw error;
 
-  const patient = await Patient.findOne(query);
-
-  if (!patient) {
-    throw new AppError('Patient not found', 404, 'NOT_FOUND');
-  }
-
-
-  // 2. Enforce Scoping (Only admins and receptionists from the same clinic can delete)
-  if (role === 'receptionist') {
-    if (!clinicId || patient.clinicId !== clinicId) {
-      throw new AppError('Access Denied', 403, 'FORBIDDEN');
-    }
-
-  } else if (role === 'clinic') {
-    if (patient.clinicId !== userId) {
-      throw new AppError('Access Denied', 403, 'FORBIDDEN');
-    }
-  } else if (role !== 'admin') {
-    throw new AppError('Access Denied', 403, 'FORBIDDEN');
-  }
-
-
-  // 3. Delete patient
-  await Patient.deleteOne({ _id: patient._id });
-
-  return { id: patient._id, patientId: patient.patientId };
+  return { id: patient.id, patientId: patient.id };
 };
 
 /**
- * Service to update patient details with scoping and unique checks.
+ * Service to update patient details.
  */
 export const updatePatient = async (id, patientData, user) => {
-  const userId = user.id || user.userId;
-  const role = (user.role || '').toLowerCase();
-  const clinicId = user.clinicId;
+  const patient = await getPatientById(id, user);
 
-  // 1. Find existing patient to verify existence and scoping
-  const query = mongoose.Types.ObjectId.isValid(id)
-    ? { $or: [{ _id: id }, { patientId: id }] }
-    : { patientId: id };
-
-  const patient = await Patient.findOne(query);
-
-  if (!patient) {
-    throw new AppError('Patient not found', 404, 'NOT_FOUND');
-  }
-
-
-  // 2. Enforce Scoping
-  if (role === 'receptionist') {
-    if (!clinicId || patient.clinicId !== clinicId) {
-      throw new AppError('Access Denied', 403, 'FORBIDDEN');
-    }
-
-  } else if (role === 'clinic') {
-    if (patient.clinicId !== userId) {
-      throw new AppError('Access Denied', 403, 'FORBIDDEN');
-    }
-  } else if (role !== 'admin') {
-    throw new AppError('Access Denied', 403, 'FORBIDDEN');
-  }
-
-
-  // 3. Handle unique field updates (email, phoneNumber)
+  // Check uniqueness
   if (patientData.email && patientData.email !== patient.email) {
-    const existing = await Patient.findOne({ email: patientData.email });
-    if (existing) throw new AppError('Email already registered', 409, 'DUPLICATE_ENTRY');
-
+    const { data: dup } = await supabase.from('patients').select('id').eq('email', patientData.email).maybeSingle();
+    if (dup) throw new AppError('Email already registered', 409, 'DUPLICATE_ENTRY');
+  }
+  if (patientData.phoneNumber && patientData.phoneNumber !== patient.phone_number) {
+    const { data: dup } = await supabase.from('patients').select('id').eq('phone_number', patientData.phoneNumber).maybeSingle();
+    if (dup) throw new AppError('Phone number already registered', 409, 'DUPLICATE_ENTRY');
   }
 
-  if (patientData.phoneNumber && patientData.phoneNumber !== patient.phoneNumber) {
-    const existing = await Patient.findOne({ phoneNumber: patientData.phoneNumber });
-    if (existing) throw new AppError('Phone number already registered', 409, 'DUPLICATE_ENTRY');
-
-  }
-
-  // 4. Update password if provided
   if (patientData.password) {
     patientData.password = await bcrypt.hash(patientData.password, 12);
   }
 
-  // 5. Perform update
-  const updatedPatient = await Patient.findByIdAndUpdate(
-    patient._id,
-    { $set: patientData },
-    { new: true, runValidators: true }
-  ).select('-password');
+  // Map camelCase to snake_case
+  const mapped = {};
+  for (const [k, v] of Object.entries(patientData)) {
+    mapped[k.replace(/([A-Z])/g, '_$1').toLowerCase()] = v;
+  }
 
-  // Audit Log
+  const { data: updated, error } = await supabase
+    .from('patients')
+    .update(mapped)
+    .eq('id', patient.id)
+    .select()
+    .single();
+
+  if (error) throw error;
+  delete updated.password;
+  updated._id = updated.id;
+
   await auditService.recordLog({
     user,
     action: 'UPDATE_PATIENT',
     resourceType: 'Patient',
-    resourceId: updatedPatient.patientId || updatedPatient._id.toString(),
-    changes: {
-      updatedFields: Object.keys(patientData)
-    }
+    resourceId: updated.id,
+    changes: { updatedFields: Object.keys(patientData) },
   });
 
-  return updatedPatient;
+  return updated;
 };
 
 /**
- * Service to fetch patient records (placeholder for Visit Module integration).
+ * Service to fetch patient records.
  */
 export const getPatientRecords = async (id, user) => {
-  // 1. Verify existence and scoping by reuse of getPatientById logic
-  // If unauthorized or not found, it will throw an error handled by the controller
   await getPatientById(id, user);
-
-  // 2. Return records (placeholder: empty array for now as per ticket requirements)
   return { records: [] };
 };

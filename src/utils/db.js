@@ -1,79 +1,36 @@
-import mongoose from "mongoose";
-import Patient from '../models/Patient';
-import Counter from '../models/Counter';
-import auditPlugin from './mongooseAuditPlugin';
-
-const MONGODB_URI = process.env.MONGODB_URI;
-
-if (!MONGODB_URI) {
-  throw new Error(
-    "Please define the MONGODB_URI environment variable inside .env.local"
-  );
-}
-
-let migrationStarted = false;
-async function runBackgroundMigration() {
-  if (migrationStarted) return;
-  migrationStarted = true;
-  try {
-    const patients = await Patient.find({ patientCode: { $exists: false } });
-    if (patients.length > 0) {
-      console.log(`[MIGRATION] Migrating ${patients.length} patients.`);
-      for (const p of patients) {
-        const counter = await Counter.findByIdAndUpdate(
-          { _id: 'patient_code' },
-          { $inc: { seq: 1 } },
-          { new: true, upsert: true }
-        );
-        p.patientCode = `PAT-${String(counter.seq).padStart(6, '0')}`;
-        await p.save();
-      }
-      console.log('[MIGRATION] Patient code migrations completed successfully.');
-    }
-  } catch (err) {
-    console.error('[MIGRATION ERROR]', err);
-  }
-}
-
 /**
- * Global is used here to maintain a cached connection across hot reloads
- * in development. This prevents connections growing exponentially
- * during API Route usage.
+ * db.js - Supabase connection singleton.
+ * Replaces the old MongoDB/Mongoose dbConnect utility.
+ * The Supabase client is already initialized as a singleton in src/lib/supabase.js,
+ * so this file simply re-exports it and performs a lightweight health-check
+ * the very first time it is called (to keep the same `await dbConnect()` call-pattern
+ * that every service file uses).
  */
-let cached = global.mongoose;
+import { supabase } from '@/lib/supabase';
 
-if (!cached) {
-  cached = global.mongoose = { conn: null, promise: null };
-}
+let connected = false;
 
 async function dbConnect() {
-  if (cached.conn) {
-    return cached.conn;
-  }
-
-  if (!cached.promise) {
-    const opts = {
-      bufferCommands: false,
-    };
-
-    mongoose.plugin(auditPlugin);
-
-    cached.promise = mongoose.connect(MONGODB_URI, opts).then((mongoose) => {
-      console.log("✅ MongoDB connected successfully");
-      return mongoose;
-    });
-  }
+  if (connected) return supabase;
 
   try {
-    cached.conn = await cached.promise;
-    runBackgroundMigration();
+    // Lightweight ping: select 1 from admins (or any table). 
+    // If credentials are not yet provided this will warn but NOT crash the import.
+    const { error } = await supabase.from('admins').select('id').limit(1);
+    if (error && error.code !== 'PGRST116') {
+      // PGRST116 = "table not found" which is fine during initial setup
+      console.warn('[Supabase] Connection check warning:', error.message);
+    } else {
+      console.log('✅ Supabase connected successfully');
+    }
+    connected = true;
   } catch (e) {
-    cached.promise = null;
-    console.error("❌ MongoDB connection failed:", e.message);
-    throw e;
+    console.error('❌ Supabase connection failed:', e.message);
+    // We don't throw here so the app still boots without credentials.
+    // Once real credentials are provided, it will connect automatically.
   }
 
-  return cached.conn;
+  return supabase;
 }
 
 export default dbConnect;

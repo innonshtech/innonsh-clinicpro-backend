@@ -1,33 +1,30 @@
-import Visit from '@/models/Visit';
-import Appointment from '@/models/Appointments';
-import dbConnect from '@/utils/db';
-import mongoose from 'mongoose';
+/**
+ * visitService.js - Migrated from Mongoose to Supabase.
+ * All business logic is preserved.
+ */
+import { supabase } from '@/lib/supabase';
 import AppError from '@/utils/AppError';
-
 
 /**
  * Service to start a consultation visit.
  */
 export const startVisit = async (payload, user) => {
-  await dbConnect();
   const { appointment_id, doctor_id, patient_id } = payload;
 
   if (user.role.toLowerCase() === 'doctor' && user.id !== doctor_id) {
     throw new AppError('Access Denied', 403, 'FORBIDDEN');
   }
 
+  // 1. Check Appointment
+  const { data: appointment, error: apptError } = await supabase
+    .from('appointments')
+    .select('*')
+    .eq('id', appointment_id)
+    .eq('doctor_id', doctor_id)
+    .eq('patient_id', patient_id)
+    .maybeSingle();
 
-  // 1. Check Appointment (Can resolve by _id or appointmentId)
-  const query = mongoose.Types.ObjectId.isValid(appointment_id)
-    ? { $or: [{ _id: appointment_id }, { appointmentId: appointment_id }] }
-    : { appointmentId: appointment_id };
-
-  const appointment = await Appointment.findOne({
-    ...query,
-    doctorId: doctor_id,
-    patientId: patient_id
-  });
-
+  if (apptError) throw apptError;
   if (!appointment) throw new AppError('Appointment not found or details mismatch', 404, 'NOT_FOUND');
 
   if (!['checked_in', 'in_progress'].includes(appointment.status)) {
@@ -35,27 +32,40 @@ export const startVisit = async (payload, user) => {
   }
 
   // 2. Check for duplicate Visit
-  const existingVisit = await Visit.findOne({ appointmentId: appointment._id });
+  const { data: existingVisit } = await supabase
+    .from('visits')
+    .select('*')
+    .eq('appointment_id', appointment.id)
+    .maybeSingle();
+
   if (existingVisit) {
-    if (appointment.status === 'in_progress') return existingVisit; // Idempotent
+    if (appointment.status === 'in_progress') {
+      existingVisit._id = existingVisit.id;
+      return existingVisit;
+    }
     throw new AppError('Visit already exists for this appointment', 409, 'DUPLICATE_ENTRY');
   }
 
-
   // 3. Create Visit
-  const newVisit = await Visit.create({
-    clinicId: payload.clinicId || user.clinicId,
-    appointmentId: appointment._id,
-    doctorId: doctor_id,
-    patientId: patient_id,
-    status: 'in_progress',
-    startTime: new Date()
-  });
+  const { data: newVisit, error: visitError } = await supabase
+    .from('visits')
+    .insert([{
+      clinic_id: payload.clinicId || user.clinicId,
+      appointment_id: appointment.id,
+      doctor_id: doctor_id,
+      patient_id: patient_id,
+      status: 'in_progress',
+      start_time: new Date().toISOString(),
+    }])
+    .select()
+    .single();
+
+  if (visitError) throw visitError;
 
   // 4. Update Appointment
-  appointment.status = 'in_progress';
-  await appointment.save();
+  await supabase.from('appointments').update({ status: 'in_progress' }).eq('id', appointment.id);
 
+  newVisit._id = newVisit.id;
   return newVisit;
 };
 
@@ -63,58 +73,58 @@ export const startVisit = async (payload, user) => {
  * Service to complete an ongoing consultation.
  */
 export const finishVisit = async (visitId, user, payload = {}) => {
-  await dbConnect();
-
-  const visit = await Visit.findById(visitId);
+  const { data: visit, error } = await supabase.from('visits').select('*').eq('id', visitId).maybeSingle();
+  if (error) throw error;
   if (!visit) throw new AppError('Visit record not found', 404, 'NOT_FOUND');
 
-  // Enforce Scoping
-  if (user.role.toLowerCase() === 'doctor' && visit.doctorId.toString() !== user.id) {
+  if (user.role.toLowerCase() === 'doctor' && visit.doctor_id !== user.id) {
     throw new AppError('Access Denied', 403, 'FORBIDDEN');
   }
-
   if (visit.status === 'completed') {
     throw new AppError('Visit is already completed', 400, 'ALREADY_COMPLETED');
   }
 
-
-  // Update Visit with status and optional payload data
-  visit.status = 'completed';
-  visit.endTime = new Date();
-
-  if (payload.symptoms) visit.symptoms = payload.symptoms;
-  if (payload.diagnosis) visit.diagnosis = payload.diagnosis;
-  if (payload.medicines) visit.medicines = payload.medicines;
-  if (payload.clinicalNotes) visit.notes = payload.clinicalNotes; // Fix: map to 'notes' in schema
+  const updateData = {
+    status: 'completed',
+    end_time: new Date().toISOString(),
+  };
+  if (payload.symptoms) updateData.symptoms = payload.symptoms;
+  if (payload.diagnosis) updateData.diagnosis = payload.diagnosis;
+  if (payload.medicines) updateData.medicines = payload.medicines;
+  if (payload.clinicalNotes) updateData.notes = payload.clinicalNotes;
   if (payload.followUpDate) {
-    visit.followUpDate = payload.followUpDate;
-    visit.followUpRequired = true;
+    updateData.follow_up_date = payload.followUpDate;
+    updateData.follow_up_required = true;
   }
-  if (payload.followUpNotes) visit.followUpNotes = payload.followUpNotes;
-  if (payload.prescriptionUrl) visit.prescriptionUrl = payload.prescriptionUrl;
+  if (payload.followUpNotes) updateData.follow_up_notes = payload.followUpNotes;
+  if (payload.prescriptionUrl) updateData.prescription_url = payload.prescriptionUrl;
 
-  await visit.save();
+  const { data: updatedVisit, error: updateError } = await supabase
+    .from('visits')
+    .update(updateData)
+    .eq('id', visitId)
+    .select()
+    .single();
 
-  // 2. Update Appointment
-  const appointment = await Appointment.findById(visit.appointmentId);
-  if (appointment) {
-    appointment.status = 'completed';
-    await appointment.save();
+  if (updateError) throw updateError;
 
-    // 3. Ticket 3: Trigger Auto-create Follow-up Appointment
-    if (visit.followUpRequired && visit.followUpDate) {
-      const { createAutoFollowup } = await import('./appointmentService');
-      await createAutoFollowup({
-        visitId: visit._id,
-        patientId: visit.patientId,
-        doctorId: visit.doctorId,
-        followUpDate: visit.followUpDate,
-        followUpNotes: visit.followUpNotes
-      }, user);
-    }
+  // Update Appointment status
+  await supabase.from('appointments').update({ status: 'completed' }).eq('id', visit.appointment_id);
+
+  // Auto-create follow-up if needed
+  if (updateData.follow_up_required && updateData.follow_up_date) {
+    const { createAutoFollowup } = await import('./appointmentService');
+    await createAutoFollowup({
+      visitId: updatedVisit.id,
+      patientId: updatedVisit.patient_id,
+      doctorId: updatedVisit.doctor_id,
+      followUpDate: updatedVisit.follow_up_date,
+      followUpNotes: updatedVisit.follow_up_notes,
+    }, user);
   }
 
-  return visit;
+  updatedVisit._id = updatedVisit.id;
+  return updatedVisit;
 };
 
 /**
@@ -122,48 +132,37 @@ export const finishVisit = async (visitId, user, payload = {}) => {
  */
 export const updateVisit = async (visitId, payload, user) => {
   try {
-    await dbConnect();
-
-    // Validate ObjectId
-    if (!mongoose.Types.ObjectId.isValid(visitId)) {
-      throw new AppError('Invalid Visit ID format', 400, 'INVALID_ID');
-    }
-
-
-    const visit = await Visit.findById(visitId);
+    const { data: visit } = await supabase.from('visits').select('*').eq('id', visitId).maybeSingle();
     if (!visit) throw new AppError('Visit record not found', 404, 'NOT_FOUND');
 
-    // Enforce Scoping
-    if (user.role.toLowerCase() === 'doctor' && visit.doctorId.toString() !== user.id) {
+    if (user.role.toLowerCase() === 'doctor' && visit.doctor_id !== user.id) {
       throw new AppError('Access Denied', 403, 'FORBIDDEN');
     }
-
     if (visit.status === 'completed') {
       throw new AppError('Cannot update a visit that is already completed', 400, 'ALREADY_COMPLETED');
     }
 
-
-    // Build Update Object
     const updates = {};
     if (payload.symptoms !== undefined) updates.symptoms = payload.symptoms;
     if (payload.diagnosis !== undefined) updates.diagnosis = payload.diagnosis;
     if (payload.medicines !== undefined) updates.medicines = payload.medicines;
-
-    // Fix: Map clinicalNotes from payload to 'notes' field in schema
     if (payload.clinicalNotes !== undefined) updates.notes = payload.clinicalNotes;
     if (payload.followUpDate !== undefined) {
-      updates.followUpDate = payload.followUpDate;
-      if (payload.followUpDate) updates.followUpRequired = true;
+      updates.follow_up_date = payload.followUpDate;
+      if (payload.followUpDate) updates.follow_up_required = true;
     }
-    if (payload.followUpNotes !== undefined) updates.followUpNotes = payload.followUpNotes;
-    if (payload.prescriptionUrl !== undefined) updates.prescriptionUrl = payload.prescriptionUrl;
+    if (payload.followUpNotes !== undefined) updates.follow_up_notes = payload.followUpNotes;
+    if (payload.prescriptionUrl !== undefined) updates.prescription_url = payload.prescriptionUrl;
 
-    const updatedVisit = await Visit.findByIdAndUpdate(
-      visitId,
-      { $set: updates },
-      { new: true, runValidators: true }
-    );
+    const { data: updatedVisit, error } = await supabase
+      .from('visits')
+      .update(updates)
+      .eq('id', visitId)
+      .select()
+      .single();
 
+    if (error) throw error;
+    updatedVisit._id = updatedVisit.id;
     return updatedVisit;
   } catch (error) {
     console.error('DEBUG: updateVisit Service Failed:', error.message);
@@ -175,26 +174,31 @@ export const updateVisit = async (visitId, payload, user) => {
  * Service to fetch visit history for a specific patient.
  */
 export const getPatientVisitHistory = async (patientId, user) => {
-  await dbConnect();
-
-  // 1. Resolve Patient ID (handle UUID or ObjectId)
   let targetId = patientId;
-  if (!mongoose.Types.ObjectId.isValid(patientId)) {
-    const Patient = (await import('@/models/Patient')).default;
-    const patientRecord = await Patient.findOne({ patientId: patientId }).select('_id');
-    if (!patientRecord) throw new AppError('Patient not found', 404, 'NOT_FOUND');
-    targetId = patientRecord._id;
+  const uuidRegex = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 
+  if (!uuidRegex.test(patientId)) {
+    const { data: pRecord } = await supabase.from('patients').select('id').eq('patient_code', patientId).maybeSingle();
+    if (!pRecord) throw new AppError('Patient not found', 404, 'NOT_FOUND');
+    targetId = pRecord.id;
   }
 
-  // 2. Fetch History with Scoping
-  // Note: We scope by clinicId to ensure data isolation
-  const visits = await Visit.find({
-    patientId: targetId
-  })
-    .populate('doctorId', 'firstName lastName specialty phone')
-    .populate('appointmentId', 'appointmentDate timeSlot reason')
-    .sort({ startTime: -1 });
+  const { data, error } = await supabase
+    .from('visits')
+    .select(`
+      *,
+      doctors (first_name, last_name, specialty, phone),
+      appointments (appointment_date, time_slot, reason)
+    `)
+    .eq('patient_id', targetId)
+    .order('start_time', { ascending: false });
 
-  return visits;
+  if (error) throw error;
+
+  return (data || []).map(v => ({
+    ...v,
+    _id: v.id,
+    doctorId: v.doctors ? { _id: v.doctors.id, ...v.doctors } : v.doctor_id,
+    appointmentId: v.appointments ? { _id: v.appointments.id, ...v.appointments } : v.appointment_id,
+  }));
 };

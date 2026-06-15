@@ -1,85 +1,98 @@
-import Billing from '@/models/Billing';
-import Visit from '@/models/Visit';
-import Appointment from '@/models/Appointments';
-import Patient from '@/models/Patient';
-import Doctor from '@/models/Doctor';
-import Counter from '@/models/Counter';
-import dbConnect from '@/utils/db';
+/**
+ * billingService.js - Migrated from Mongoose to Supabase.
+ * All business logic is preserved.
+ */
+import { supabase } from '@/lib/supabase';
 import AppError from '@/utils/AppError';
 import * as auditService from '@/services/auditService';
 
+const getNextInvoiceCode = async () => {
+  const currentYear = new Date().getFullYear();
+  const counterId = `invoice_seq_${currentYear}`;
+  const { data, error } = await supabase.rpc('increment_counter', { counter_id: counterId });
+  if (error) return `INV-${currentYear}-${Date.now()}`;
+  return `INV-${currentYear}-${String(data).padStart(4, '0')}`;
+};
+
+const findBillByAnyId = async (id) => {
+  const uuidRegex = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+  let req = supabase.from('billings').select('*');
+  if (uuidRegex.test(id)) {
+    req = req.eq('id', id);
+  } else {
+    req = req.eq('billing_id', id);
+  }
+  const { data, error } = await req.maybeSingle();
+  if (error) throw error;
+  if (data) data._id = data.id;
+  return data;
+};
 
 /**
  * Service to generate a new invoice for a completed visit.
  */
 export const createInvoice = async (payload, user) => {
-  await dbConnect();
   const { visit_id, items, discount = 0, tax = 0 } = payload;
 
   // 1. Fetch Visit Details
-  const visit = await Visit.findById(visit_id);
+  const { data: visit, error: visitError } = await supabase.from('visits').select('*').eq('id', visit_id).maybeSingle();
+  if (visitError) throw visitError;
   if (!visit) throw new AppError('Visit record not found', 404, 'NOT_FOUND');
 
-  // Check if clinic matches (Data Isolation)
-  const appointment = await Appointment.findById(visit.appointmentId);
-  const clinicId = appointment?.clinicId;
-  if (user.clinicId && clinicId && String(clinicId) !== String(user.clinicId)) {
+  // 2. Clinic Isolation
+  if (user.clinicId && visit.clinic_id && visit.clinic_id !== user.clinicId) {
     throw new AppError('Access Denied', 403, 'FORBIDDEN');
   }
 
+  // 3. Prevent Duplicate Billing (update if exists)
+  const { data: existingBill } = await supabase.from('billings').select('*').eq('visit_id', visit.id).maybeSingle();
 
-
-  // 2. Prevent Duplicate Billing
-  const existingBill = await Billing.findOne({ visitId: visit._id });
-  
-  // 3. Calculate Totals
   const totalAmount = items.reduce((sum, item) => sum + item.amount, 0);
   const finalAmount = totalAmount + tax - discount;
 
   if (existingBill) {
-    existingBill.items = items;
-    existingBill.totalAmount = totalAmount;
-    existingBill.discount = discount;
-    existingBill.tax = tax;
-    existingBill.finalAmount = finalAmount;
-    existingBill.remainingAmount = finalAmount - (existingBill.paidAmount || 0);
-    
-    if (existingBill.remainingAmount <= 0) {
-      existingBill.status = 'paid';
-    } else if ((existingBill.paidAmount || 0) > 0) {
-      existingBill.status = 'partially_paid';
-    } else {
-      existingBill.status = 'pending';
-    }
+    const paidAmount = existingBill.paid_amount || 0;
+    const remainingAmount = finalAmount - paidAmount;
+    let status = 'pending';
+    if (remainingAmount <= 0) status = 'paid';
+    else if (paidAmount > 0) status = 'partially_paid';
 
-    await existingBill.save();
-    return existingBill;
+    const { data: updated, error } = await supabase
+      .from('billings')
+      .update({ items, total_amount: totalAmount, discount, tax, final_amount: finalAmount, remaining_amount: remainingAmount, status })
+      .eq('id', existingBill.id)
+      .select()
+      .single();
+    if (error) throw error;
+    updated._id = updated.id;
+    return updated;
   }
 
-  // 4. Auto-generate sequential invoice code: INV-[YEAR]-[INCREMENT]
-  const currentYear = new Date().getFullYear();
-  const counter = await Counter.findByIdAndUpdate(
-    { _id: `invoice_seq_${currentYear}` },
-    { $inc: { seq: 1 } },
-    { new: true, upsert: true }
-  );
-  const billingId = `INV-${currentYear}-${String(counter.seq).padStart(4, '0')}`;
+  // 4. Auto-generate sequential invoice code
+  const billingId = await getNextInvoiceCode();
 
   // 5. Create Billing Record
-  const newBill = await Billing.create({
-    billingId,
-    patientId: visit.patientId,
-    visitId: visit._id,
-    doctorId: visit.doctorId,
-    clinicId: clinicId,
-    items,
-    totalAmount,
-    discount,
-    tax,
-    finalAmount,
-    status: 'pending'
-  });
+  const { data: newBill, error: createError } = await supabase
+    .from('billings')
+    .insert([{
+      billing_id: billingId,
+      patient_id: visit.patient_id,
+      visit_id: visit.id,
+      doctor_id: visit.doctor_id,
+      clinic_id: visit.clinic_id,
+      items,
+      total_amount: totalAmount,
+      discount,
+      tax,
+      final_amount: finalAmount,
+      remaining_amount: finalAmount,
+      status: 'pending',
+    }])
+    .select()
+    .single();
 
+  if (createError) throw createError;
+  newBill._id = newBill.id;
   return newBill;
 };
 
@@ -87,247 +100,158 @@ export const createInvoice = async (payload, user) => {
  * Service to fetch billing history with filters and pagination.
  */
 export const getBillingHistory = async (filters, user) => {
-  await dbConnect();
   const { page = 1, limit = 10, status, patientId, doctorId, startDate, endDate, visitId } = filters;
 
-  // 1. Build Query Object
-  if (!user?.clinicId) {
-    throw new AppError('clinicId missing', 401, 'UNAUTHORIZED');
-  }
+  if (!user?.clinicId) throw new AppError('clinicId missing', 401, 'UNAUTHORIZED');
 
+  let req = supabase
+    .from('billings')
+    .select(`
+      *,
+      patients (first_name, last_name, id, phone_number, email),
+      doctors (first_name, last_name)
+    `, { count: 'exact' })
+    .eq('clinic_id', user.clinicId);
 
-  const query = {
-    clinicId: String(user.clinicId) // Enforce data isolation
-  };
+  if (status) req = req.eq('status', status);
+  if (patientId) req = req.eq('patient_id', patientId);
+  if (doctorId) req = req.eq('doctor_id', doctorId);
+  if (visitId) req = req.eq('visit_id', visitId);
+  if (startDate) req = req.gte('created_at', startDate);
+  if (endDate) req = req.lte('created_at', endDate);
 
+  req = req
+    .order('created_at', { ascending: false })
+    .range((page - 1) * limit, page * limit - 1);
 
-  if (status) query.status = status;
-  if (patientId) query.patientId = patientId;
-  if (doctorId) query.doctorId = doctorId;
-  if (visitId) query.visitId = visitId;
+  const { data, error, count } = await req;
+  if (error) throw error;
 
-  if (startDate || endDate) {
-    query.createdAt = {};
-    if (startDate) query.createdAt.$gte = new Date(startDate);
-    if (endDate) query.createdAt.$lte = new Date(endDate);
-  }
+  const bills = (data || []).map(b => ({
+    ...b,
+    _id: b.id,
+    patientId: b.patients ? { _id: b.patients.id, ...b.patients } : b.patient_id,
+    doctorId: b.doctors ? { _id: b.doctors.id, ...b.doctors } : b.doctor_id,
+  }));
 
-  // 2. Execute Query with Pagination
-  const skip = (page - 1) * limit;
-
-  console.log(`[BILLING DEBUG] Fetching history with query:`, JSON.stringify(query));
-
-  try {
-    const [bills, total] = await Promise.all([
-      Billing.find(query)
-        .populate('patientId')
-        .populate('doctorId', 'firstName lastName')
-        .sort({ createdAt: -1 })
-        .skip(skip)
-        .limit(limit),
-      Billing.countDocuments(query)
-    ]);
-
-    return {
-      bills,
-      total,
-      page,
-      limit,
-      totalPages: Math.ceil(total / limit)
-    };
-  } catch (dbError) {
-    console.error(`[BILLING ERROR] DB Query Failed:`, dbError);
-    throw new AppError(`Database error in billing history: ${dbError.message}`, 500, 'DB_ERROR');
-
-  }
+  return { bills, total: count || 0, page, limit, totalPages: Math.ceil((count || 0) / limit) };
 };
-
 
 /**
  * Service to fetch full details of a specific invoice.
  */
 export const getInvoiceDetails = async (id, user) => {
-  await dbConnect();
-  const mongoose = (await import('mongoose')).default;
+  const uuidRegex = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 
-  // 1. Build Query (handle both string BillingID and ObjectId)
-  const query = mongoose.Types.ObjectId.isValid(id)
-    ? { _id: id }
-    : { billingId: id };
+  let req = supabase.from('billings').select(`
+    *,
+    patients (first_name, last_name, id, phone_number, email),
+    visits (*),
+    doctors (first_name, last_name, specialty)
+  `);
 
-  // 2. Fetch with Population
-  const bill = await Billing.findOne(query)
-    .populate('patientId', 'firstName lastName patientId phoneNumber email')
-    .populate('visitId')
-    .populate('doctorId', 'firstName lastName specialty');
+  if (uuidRegex.test(id)) {
+    req = req.eq('id', id);
+  } else {
+    req = req.eq('billing_id', id);
+  }
 
+  const { data: bill, error } = await req.maybeSingle();
+  if (error) throw error;
   if (!bill) throw new AppError('Invoice not found', 404, 'NOT_FOUND');
 
-  // 3. Clinic Isolation
-  if (user.clinicId && String(bill.clinicId) !== String(user.clinicId)) {
+  if (user.clinicId && bill.clinic_id !== user.clinicId) {
     throw new AppError('Access Denied', 403, 'FORBIDDEN');
   }
 
-
+  bill._id = bill.id;
+  bill.patientId = bill.patients ? { _id: bill.patients.id, ...bill.patients } : bill.patient_id;
+  bill.visitId = bill.visits ? { _id: bill.visits.id, ...bill.visits } : bill.visit_id;
+  bill.doctorId = bill.doctors ? { _id: bill.doctors.id, ...bill.doctors } : bill.doctor_id;
 
   return bill;
 };
 
 /**
  * Service to handle billing refunds.
- * @param {string} id - Billing ID
- * @param {Object} refundData - Refund details (amount, reason)
- * @param {Object} user - User initiating refund
  */
 export const processRefund = async (id, refundData, user) => {
-  await dbConnect();
-  const mongoose = (await import('mongoose')).default;
-
   const { refundAmount, reason } = refundData;
   const { clinicId, role } = user;
 
-  // 1. Find Billing Record
-  const query = mongoose.Types.ObjectId.isValid(id)
-    ? { _id: id }
-    : { billingId: id };
+  const bill = await findBillByAnyId(id);
+  if (!bill) throw new AppError('Invoice not found', 404, 'NOT_FOUND');
 
-  const bill = await Billing.findOne(query);
+  if (clinicId && bill.clinic_id !== clinicId) throw new AppError('Access Denied', 403, 'FORBIDDEN');
+  if (role.toLowerCase() === 'doctor') throw new AppError('Doctors cannot process billing refunds', 403, 'FORBIDDEN');
+  if (bill.status === 'refunded') throw new AppError('Invoice is already refunded', 400, 'ALREADY_REFUNDED');
+  if (bill.status !== 'paid') throw new AppError('Can only refund paid invoices.', 400, 'INVALID_STATUS');
+  if (refundAmount > bill.final_amount) throw new AppError('Refund amount cannot exceed final amount paid', 400, 'INVALID_AMOUNT');
 
-  if (!bill) {
-    throw new AppError('Invoice not found', 404, 'NOT_FOUND');
-  }
+  const { data: updated, error } = await supabase
+    .from('billings')
+    .update({ status: 'refunded', refund_amount: refundAmount, refund_reason: reason, refunded_at: new Date().toISOString() })
+    .eq('id', bill.id)
+    .select()
+    .single();
 
-  // 2. Enforce Scoping & RBAC
-  if (clinicId && String(bill.clinicId) !== String(clinicId)) {
-    throw new AppError('Access Denied', 403, 'FORBIDDEN');
-  }
+  if (error) throw error;
 
-  // Usually admins or receptionists process refunds. Let's allow both.
-  if (role.toLowerCase() === 'doctor') {
-    throw new AppError('Doctors cannot process billing refunds', 403, 'FORBIDDEN');
-  }
-
-  // 3. Validation
-  if (bill.status === 'refunded') {
-    throw new AppError('Invoice is already refunded', 400, 'ALREADY_REFUNDED');
-  }
-
-  // We can only refund paid bills. If pending, it should be cancelled instead.
-  if (bill.status !== 'paid') {
-    throw new AppError('Can only refund paid invoices. Use cancellation for pending invoices.', 400, 'INVALID_STATUS');
-  }
-
-  if (refundAmount > bill.finalAmount) {
-    throw new AppError('Refund amount cannot exceed final amount paid', 400, 'INVALID_AMOUNT');
-  }
-
-  // 4. Process Update
-  bill.status = 'refunded';
-  bill.refundAmount = refundAmount;
-  bill.refundReason = reason;
-  bill.refundedAt = new Date();
-
-  await bill.save();
-
-  // Audit Log
   await auditService.recordLog({
     user,
     action: 'BILLING_REFUND',
     resourceType: 'Billing',
-    resourceId: bill.billingId || bill._id.toString(),
-    changes: {
-      status: 'refunded',
-      refundAmount: refundAmount,
-      reason: reason
-    }
+    resourceId: updated.billing_id || updated.id,
+    changes: { status: 'refunded', refundAmount, reason },
   });
 
-  return bill;
+  updated._id = updated.id;
+  return updated;
 };
 
 /**
  * Service to handle billing payments (partial or full).
- * @param {string} id - Billing ID
- * @param {Object} paymentData - Payment details (paymentAmount, paymentMethod, transactionId)
- * @param {Object} user - User initiating payment
  */
 export const processPayment = async (id, paymentData, user) => {
-  await dbConnect();
-  const mongoose = (await import('mongoose')).default;
-
   const { paymentAmount, paymentMethod, transactionId } = paymentData;
   const { clinicId, role } = user;
 
-  // 1. Find Billing Record
-  const query = mongoose.Types.ObjectId.isValid(id)
-    ? { _id: id }
-    : { billingId: id };
+  const bill = await findBillByAnyId(id);
+  if (!bill) throw new AppError('Invoice not found', 404, 'NOT_FOUND');
 
-  const bill = await Billing.findOne(query);
+  if (clinicId && bill.clinic_id !== clinicId) throw new AppError('Access Denied', 403, 'FORBIDDEN');
+  if (role.toLowerCase() === 'doctor') throw new AppError('Doctors cannot process billing payments', 403, 'FORBIDDEN');
+  if (bill.status === 'paid') throw new AppError('Invoice is already fully paid', 400, 'ALREADY_PAID');
+  if (bill.status === 'cancelled') throw new AppError('Cannot process payment for a cancelled invoice', 400, 'INVALID_STATUS');
+  if (paymentAmount <= 0) throw new AppError('Payment amount must be greater than 0', 400, 'INVALID_AMOUNT');
 
-  if (!bill) {
-    throw new AppError('Invoice not found', 404, 'NOT_FOUND');
-  }
-
-  // 2. Enforce Scoping & RBAC
-  if (clinicId && String(bill.clinicId) !== String(clinicId)) {
-    throw new AppError('Access Denied', 403, 'FORBIDDEN');
-  }
-
-  // Receptionists or Admins usually handle payments
-  if (role.toLowerCase() === 'doctor') {
-    throw new AppError('Doctors cannot process billing payments', 403, 'FORBIDDEN');
-  }
-
-  // 3. Validation
-  if (bill.status === 'paid') {
-    throw new AppError('Invoice is already fully paid', 400, 'ALREADY_PAID');
-  }
-  
-  if (bill.status === 'cancelled') {
-    throw new AppError('Cannot process payment for a cancelled invoice', 400, 'INVALID_STATUS');
-  }
-
-  if (paymentAmount <= 0) {
-    throw new AppError('Payment amount must be greater than 0', 400, 'INVALID_AMOUNT');
-  }
-
-  // Calculate new paid and remaining amounts
-  const currentPaid = bill.paidAmount || 0;
+  const currentPaid = bill.paid_amount || 0;
   const newPaidAmount = currentPaid + paymentAmount;
-  
-  if (newPaidAmount > bill.finalAmount) {
-    throw new AppError('Payment amount exceeds remaining balance', 400, 'INVALID_AMOUNT');
-  }
+  if (newPaidAmount > bill.final_amount) throw new AppError('Payment amount exceeds remaining balance', 400, 'INVALID_AMOUNT');
 
-  // 4. Update bill
-  bill.paidAmount = newPaidAmount;
-  bill.remainingAmount = bill.finalAmount - newPaidAmount;
-  bill.paymentMethod = paymentMethod;
-  if (transactionId) bill.transactionId = transactionId;
-  bill.paidAt = new Date();
+  const remainingAmount = bill.final_amount - newPaidAmount;
+  const newStatus = remainingAmount === 0 ? 'paid' : 'partially_paid';
 
-  // Set status based on whether the full amount is paid
-  if (bill.remainingAmount === 0) {
-    bill.status = 'paid';
-  } else {
-    bill.status = 'partially_paid';
-  }
+  const updateData = {
+    paid_amount: newPaidAmount,
+    remaining_amount: remainingAmount,
+    payment_method: paymentMethod,
+    paid_at: new Date().toISOString(),
+    status: newStatus,
+  };
+  if (transactionId) updateData.transaction_id = transactionId;
 
-  await bill.save();
+  const { data: updated, error } = await supabase.from('billings').update(updateData).eq('id', bill.id).select().single();
+  if (error) throw error;
 
-  // Audit Log
   await auditService.recordLog({
     user,
     action: 'BILLING_PAYMENT',
     resourceType: 'Billing',
-    resourceId: bill.billingId || bill._id.toString(),
-    changes: {
-      status: bill.status,
-      paymentAmount: paymentAmount,
-      remainingAmount: bill.remainingAmount
-    }
+    resourceId: updated.billing_id || updated.id,
+    changes: { status: updated.status, paymentAmount, remainingAmount },
   });
 
-  return bill;
+  updated._id = updated.id;
+  return updated;
 };
