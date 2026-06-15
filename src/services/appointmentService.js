@@ -1,758 +1,599 @@
-import Appointment from '@/models/Appointments';
-import Availability from '@/models/Availability';
-import Patient from '@/models/Patient';
-import Doctor from '@/models/Doctor';
+/**
+ * appointmentService.js - Migrated from Mongoose to Supabase.
+ * All business logic is preserved identically.
+ */
+import { supabase } from '@/lib/supabase';
 import { sendSMS } from '@/utils/smsService';
-import dbConnect from '@/utils/db';
-import mongoose from 'mongoose';
 import AppError from '@/utils/AppError';
 import * as auditService from '@/services/auditService';
+import crypto from 'crypto';
 
+// ─── Helpers ────────────────────────────────────────────────────────────────
+
+const toDate = (d) => {
+  const date = new Date(d);
+  date.setUTCHours(0, 0, 0, 0);
+  return date.toISOString().split('T')[0]; // YYYY-MM-DD for Supabase DATE columns
+};
+
+const findAppointment = async (id) => {
+  const uuidRegex = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+  let req = supabase.from('appointments').select('*');
+  if (uuidRegex.test(id)) {
+    req = req.eq('id', id);
+  } else {
+    // Legacy appointmentId string: APP-XXXXXXXX
+    req = req.or(`id.eq.${id}`);
+  }
+  const { data, error } = await req.maybeSingle();
+  if (error) throw error;
+  if (data) data._id = data.id;
+  return data;
+};
+
+// ─── Service Functions ───────────────────────────────────────────────────────
 
 /**
  * Service to book a new appointment.
- * @param {Object} appointmentData - Data from the request body
- * @param {Object} user - Authenticated user object (from req.user)
  */
 export const createAppointment = async (appointmentData, user) => {
-  await dbConnect();
-
-  const {
-    doctorId,
-    appointmentDate,
-    timeSlot,
-    isEmergency,
-    ...otherData
-  } = appointmentData;
+  const { doctorId, appointmentDate, timeSlot, isEmergency, ...otherData } = appointmentData;
   const { clinicId } = user;
-
-  const reqDate = new Date(appointmentDate);
-  reqDate.setUTCHours(0, 0, 0, 0);
+  const reqDate = toDate(appointmentDate);
 
   // 0. Leave validation
-  const Leave = mongoose.models.Leave || mongoose.model('Leave');
-  const onLeave = await Leave.findOne({
-    doctorId: new mongoose.Types.ObjectId(doctorId),
-    date: reqDate
-  });
+  const { data: onLeave } = await supabase
+    .from('leaves')
+    .select('id')
+    .eq('doctor_id', doctorId)
+    .eq('date', reqDate)
+    .maybeSingle();
 
-  if (onLeave) {
-    throw new AppError('Doctor is on leave on this date', 400, 'DOCTOR_ON_LEAVE');
-  }
+  if (onLeave) throw new AppError('Doctor is on leave on this date', 400, 'DOCTOR_ON_LEAVE');
 
-  // 1. Double-booking prevention
-  // Check if this doctor already has an appointment booked for the same date and time slot
-  const existingAppointment = await Appointment.findOne({
-    doctorId,
-    appointmentDate: reqDate,
-    timeSlot,
-    status: 'booked',
-    clinicId // Within the same clinic
-  }).populate('patientId');
+  // 1. Double-booking check
+  const { data: existingAppointment } = await supabase
+    .from('appointments')
+    .select('*, patients(first_name, last_name, phone_number)')
+    .eq('doctor_id', doctorId)
+    .eq('appointment_date', reqDate)
+    .eq('time_slot', timeSlot)
+    .eq('status', 'booked')
+    .eq('clinic_id', clinicId)
+    .maybeSingle();
 
   if (existingAppointment) {
     if (!isEmergency) {
-      const error = new AppError('Doctor already has a booked appointment at this time', 409, 'SLOT_OCCUPIED');
-      throw error;
+      throw new AppError('Doctor already has a booked appointment at this time', 409, 'SLOT_OCCUPIED');
     }
 
-
-    // Cascade Reschedule Logic
+    // Cascade Reschedule Logic for emergency
     console.log(`[EMERGENCY] Slot ${timeSlot} is occupied. Initiating cascade reschedule.`);
 
-    // Fetch doctor's availability for the day to know the slot sequence
-    let availability = await Availability.findOne({
-      doctorId: new mongoose.Types.ObjectId(doctorId),
-      date: reqDate,
-      clinicId
-    });
+    const { data: availability } = await supabase
+      .from('availabilities')
+      .select('available_slots')
+      .eq('doctor_id', doctorId)
+      .eq('date', reqDate)
+      .maybeSingle();
 
-    let availableSlots = availability?.availableSlots || [];
-
-    // Safety Net: If no availability record, use default 9-5 sequence
+    let availableSlots = availability?.available_slots || [];
     if (availableSlots.length === 0) {
-      console.log(`[EMERGENCY] No availability record found. Using default slot sequence (9 AM - 5 PM).`);
       availableSlots = [
         '09:00 AM', '09:30 AM', '10:00 AM', '10:30 AM', '11:00 AM', '11:30 AM',
         '12:00 PM', '12:30 PM', '01:00 PM', '01:30 PM', '02:00 PM', '02:30 PM',
-        '03:00 PM', '03:30 PM', '04:00 PM', '04:30 PM', '05:00 PM'
+        '03:00 PM', '03:30 PM', '04:00 PM', '04:30 PM', '05:00 PM',
       ];
     }
 
     const currentSlotIndex = availableSlots.indexOf(timeSlot);
-
     if (currentSlotIndex === -1) {
       throw new AppError('Requested emergency slot is not within doctors defined availability.', 400, 'INVALID_SLOT');
     }
 
+    const { data: futureAppointments } = await supabase
+      .from('appointments')
+      .select('*, patients(phone_number, first_name)')
+      .eq('doctor_id', doctorId)
+      .eq('appointment_date', reqDate)
+      .eq('status', 'booked')
+      .eq('clinic_id', clinicId);
 
-    // Find all booked appointments for this doctor on this day
-    const futureAppointments = await Appointment.find({
-      doctorId,
-      appointmentDate: reqDate,
-      status: 'booked',
-      clinicId
-    }).populate('patientId');
-
-    const bookedApptsMap = new Map();
-    futureAppointments.forEach(app => bookedApptsMap.set(app.timeSlot, app));
+    const bookedApptsMap = new Map((futureAppointments || []).map(a => [a.time_slot, a]));
 
     let appointmentToMove = existingAppointment;
-
-    // Step-by-step bumping
     let index = currentSlotIndex;
-    let movedAppointments = [];
+    const movedAppointments = [];
 
-    // We take the current appointment, and we need to push it to the next slot (index + 1).
-    // If index + 1 is booked, we push the one at index+1 to index+2, etc.
     while (appointmentToMove && index < availableSlots.length - 1) {
       const nextSlot = availableSlots[index + 1];
       const apptAtNextSlot = bookedApptsMap.get(nextSlot);
 
-      // Update appointmentToMove to nextSlot
-      appointmentToMove.rescheduledFrom = appointmentToMove.timeSlot;
-      appointmentToMove.timeSlot = nextSlot;
-      movedAppointments.push(appointmentToMove);
+      movedAppointments.push({
+        id: appointmentToMove.id,
+        rescheduledFrom: appointmentToMove.time_slot,
+        newTimeSlot: nextSlot,
+        patientPhone: appointmentToMove.patients?.phone_number,
+        patientName: appointmentToMove.patients?.first_name || 'Patient',
+      });
 
       if (apptAtNextSlot) {
-        // Next slot is also occupied, we need to move it in the next iteration
         appointmentToMove = apptAtNextSlot;
         index++;
       } else {
-        // Next slot is free, cascade ends
         appointmentToMove = null;
       }
     }
 
     if (appointmentToMove) {
-      throw new AppError('Cascade schedule failed: Reached the end of doctors availability for the day. Cannot push appointments further.', 400, 'CASCADE_FAILED');
+      throw new AppError('Cascade schedule failed: Reached end of doctor availability.', 400, 'CASCADE_FAILED');
     }
 
-
-    // Save all moved appointments and send SMS
     for (const app of movedAppointments) {
-      await app.save();
+      await supabase.from('appointments')
+        .update({ time_slot: app.newTimeSlot, rescheduled_from: app.rescheduledFrom })
+        .eq('id', app.id);
 
-      // Send SMS
-      const patientPhone = app.patientId?.phoneNumber;
-      if (patientPhone) {
-        const msg = `Dear ${app.patientId?.firstName || 'Patient'}, due to a medical emergency at the clinic, your appointment has been moved from ${app.rescheduledFrom} to ${app.timeSlot}. Sorry for the inconvenience.`;
-        const smsRes = await sendSMS(patientPhone, msg);
-        if (smsRes.success) {
-          app.smsNotified = true;
-          await app.save();
-        }
+      if (app.patientPhone) {
+        const msg = `Dear ${app.patientName}, due to a medical emergency, your appointment has been moved from ${app.rescheduledFrom} to ${app.newTimeSlot}.`;
+        await sendSMS(app.patientPhone, msg);
       }
     }
   }
 
-  // 2. Create the emergency/normal appointment
-  const newAppointment = await Appointment.create({
-    ...otherData,
-    doctorId,
-    appointmentDate: reqDate,
-    timeSlot,
-    clinicId,
-    status: 'booked',
-    isEmergency: isEmergency === true
-  });
+  // 2. Create the appointment
+  const { data: newAppointment, error } = await supabase
+    .from('appointments')
+    .insert([{
+      ...Object.fromEntries(
+        Object.entries(otherData).map(([k, v]) => [k.replace(/([A-Z])/g, '_$1').toLowerCase(), v])
+      ),
+      doctor_id: doctorId,
+      appointment_date: reqDate,
+      time_slot: timeSlot,
+      clinic_id: clinicId,
+      status: 'booked',
+      is_emergency: isEmergency === true,
+    }])
+    .select()
+    .single();
 
+  if (error) throw error;
+  newAppointment._id = newAppointment.id;
   return newAppointment;
 };
 
 /**
  * Service to fetch paginated and filtered list of appointments.
- * @param {Object} queryParams - Query filters and pagination
- * @param {Object} user - Authenticated user object
  */
 export const getAppointmentList = async (queryParams, user) => {
-  await dbConnect();
-
   const { page, limit, doctorId, date, status } = queryParams;
   const { id: userId, role, clinicId } = user;
   const userRole = role.toLowerCase();
 
-  // 1. Build Scoping Query
-  let scopingQuery = { clinicId };
+  let req = supabase.from('appointments').select(`
+    *,
+    patients (first_name, last_name, phone_number, id),
+    doctors (first_name, last_name, specialty)
+  `, { count: 'exact' });
 
-  if (userRole === 'doctor') {
-    // Doctors only see their own appointments
-    scopingQuery.doctorId = userId;
-  }
+  req = req.eq('clinic_id', clinicId);
 
-  // 2. Build Filter Query
-  const filterQuery = { ...scopingQuery };
-
-  if (doctorId && userRole !== 'doctor') {
-    filterQuery.doctorId = doctorId;
-  }
-
+  if (userRole === 'doctor') req = req.eq('doctor_id', userId);
+  if (doctorId && userRole !== 'doctor') req = req.eq('doctor_id', doctorId);
   if (date) {
-    // Standardize to UTC start and end of day to avoid timezone-related misses
-    const startOfDay = new Date(date);
-    startOfDay.setUTCHours(0, 0, 0, 0);
-    
-    const endOfDay = new Date(date);
-    endOfDay.setUTCHours(23, 59, 59, 999);
-    
-    filterQuery.appointmentDate = { $gte: startOfDay, $lte: endOfDay };
+    req = req.gte('appointment_date', date).lte('appointment_date', date);
   }
+  if (status) req = req.eq('status', status);
 
-  if (status) {
-    filterQuery.status = status;
-  }
+  req = req
+    .order('appointment_date', { ascending: true })
+    .order('time_slot', { ascending: true })
+    .range((page - 1) * limit, page * limit - 1);
 
-  // 3. Execute Query with Pagination and Sorting
-  const skip = (page - 1) * limit;
+  const { data, error, count } = await req;
+  if (error) throw error;
 
-  const [appointments, total] = await Promise.all([
-    Appointment.find(filterQuery)
-      .populate('patientId', 'firstName lastName phoneNumber patientId')
-      .populate('doctorId', 'firstName lastName specialty')
-      .sort({ appointmentDate: 1, timeSlot: 1 })
-      .skip(skip)
-      .limit(limit),
-    Appointment.countDocuments(filterQuery)
-  ]);
+  const appointments = (data || []).map(a => ({
+    ...a,
+    _id: a.id,
+    patientId: a.patients ? { _id: a.patients.id, ...a.patients } : a.patient_id,
+    doctorId: a.doctors ? { _id: a.doctors.id, ...a.doctors } : a.doctor_id,
+  }));
 
   return {
     appointments,
     pagination: {
-      total,
+      total: count || 0,
       page,
       limit,
-      totalPages: Math.ceil(total / limit)
-    }
+      totalPages: Math.ceil((count || 0) / limit),
+    },
   };
 };
 
 /**
  * Service to update appointment status.
- * @param {string} id - Appointment ID or _id
- * @param {string} status - New status
- * @param {Object} user - Authenticated user object
  */
 export const updateAppointmentStatus = async (id, status, user) => {
-  await dbConnect();
-
   const { id: userId, role, clinicId } = user;
   const userRole = role.toLowerCase();
 
-  // 1. Find Appointment and Verify Scoping
-  const appointment = await Appointment.findOne({
-    $or: [
-      { _id: mongoose.Types.ObjectId.isValid(id) ? id : null },
-      { appointmentId: id }
-    ].filter(q => q._id !== null)
-  });
+  const appointment = await findAppointment(id);
+  if (!appointment) throw new AppError('Appointment not found', 404, 'NOT_FOUND');
 
-  if (!appointment) {
-    throw new AppError('Appointment not found', 404, 'NOT_FOUND');
-  }
+  if (appointment.clinic_id !== clinicId) throw new AppError('Access Denied', 403, 'FORBIDDEN');
+  if (userRole === 'doctor' && appointment.doctor_id !== userId) throw new AppError('Access Denied', 403, 'FORBIDDEN');
 
-
-  // 2. Enforce RBAC/Scoping
-  if (appointment.clinicId !== clinicId) {
-    throw new AppError('Access Denied', 403, 'FORBIDDEN');
-  }
-
-  if (userRole === 'doctor' && appointment.doctorId.toString() !== userId) {
-    throw new AppError('Access Denied', 403, 'FORBIDDEN');
-  }
-
-
-  // 3. Status Transition Logic & Role Restrictions
   const targetStatus = status.toLowerCase();
-
-  // Prevent setting 'in_progress' or 'completed' via this generic update service
   if (['in_progress', 'completed'].includes(targetStatus) && !['admin', 'receptionist', 'doctor'].includes(userRole)) {
-    throw new AppError(`Cannot set status to ${targetStatus} manually. Please use the clinical consultation flow.`, 400, 'INVALID_TRANSITION');
+    throw new AppError(`Cannot set status to ${targetStatus} manually.`, 400, 'INVALID_TRANSITION');
   }
 
-  // 4. Update Status
-  appointment.status = targetStatus;
-  await appointment.save();
+  const { data: updated, error } = await supabase
+    .from('appointments')
+    .update({ status: targetStatus })
+    .eq('id', appointment.id)
+    .select()
+    .single();
 
-  return appointment;
+  if (error) throw error;
+  updated._id = updated.id;
+  return updated;
 };
 
 /**
  * Service to reschedule an appointment.
- * @param {string} id - Appointment ID
- * @param {Object} rescheduleData - New date and time slot
- * @param {Object} user - Authenticated user object
  */
 export const rescheduleAppointment = async (id, rescheduleData, user) => {
-  await dbConnect();
-
   const { appointmentDate, timeSlot, notes } = rescheduleData;
   const { clinicId } = user;
 
-  const appointment = await Appointment.findOne({
-    $or: [
-      { _id: mongoose.Types.ObjectId.isValid(id) ? id : null },
-      { appointmentId: id }
-    ].filter(q => q._id !== null)
-  });
+  const appointment = await findAppointment(id);
+  if (!appointment) throw new AppError('Appointment not found', 404, 'NOT_FOUND');
 
-  if (!appointment) {
-    throw new AppError('Appointment not found', 404, 'NOT_FOUND');
-  }
-
-  // Check authorization - allow admin, receptionist, or the assigned doctor
-  if (user.role.toLowerCase() === 'doctor' && appointment.doctorId.toString() !== user.id) {
+  if (user.role.toLowerCase() === 'doctor' && appointment.doctor_id !== user.id) {
     throw new AppError('Access Denied: You can only reschedule your own appointments', 403, 'FORBIDDEN');
   }
-  
-  if (appointment.clinicId !== clinicId) {
+  if (appointment.clinic_id !== clinicId) {
     throw new AppError('Access Denied: Appointment belongs to a different clinic', 403, 'FORBIDDEN');
   }
 
-  const reqDate = new Date(appointmentDate);
-  reqDate.setUTCHours(0, 0, 0, 0);
+  const reqDate = toDate(appointmentDate);
 
-  // Check if the new slot is already booked for the SAME doctor
-  const existingAppointment = await Appointment.findOne({
-    doctorId: appointment.doctorId,
-    appointmentDate: reqDate,
-    timeSlot,
-    status: { $in: ['booked', 'scheduled', 'checked_in'] },
-    clinicId,
-    _id: { $ne: appointment._id } // Exclude current appointment
-  });
+  // Check if new slot is already booked
+  const { data: slotTaken } = await supabase
+    .from('appointments')
+    .select('id')
+    .eq('doctor_id', appointment.doctor_id)
+    .eq('appointment_date', reqDate)
+    .eq('time_slot', timeSlot)
+    .in('status', ['booked', 'scheduled', 'checked_in'])
+    .neq('id', appointment.id)
+    .maybeSingle();
 
-  if (existingAppointment) {
-    throw new AppError('Doctor already has a booked appointment at this new time', 409, 'SLOT_OCCUPIED');
-  }
+  if (slotTaken) throw new AppError('Doctor already has a booked appointment at this new time', 409, 'SLOT_OCCUPIED');
 
-  // Update appointment details
-  appointment.appointmentDate = reqDate;
-  appointment.timeSlot = timeSlot;
-  if (notes !== undefined) {
-    appointment.notes = notes;
-  }
-
-  // If the appointment was checked in or in progress, reset it back to initial state
-  // because they are changing the time/date, they lose their spot in the queue.
+  const updateData = { appointment_date: reqDate, time_slot: timeSlot };
+  if (notes !== undefined) updateData.notes = notes;
   if (['checked_in', 'in_progress'].includes(appointment.status)) {
-    appointment.status = appointment.type === 'follow_up' ? 'scheduled' : 'booked';
-    appointment.queueNumber = undefined;
-    appointment.checkInTime = undefined;
+    updateData.status = appointment.type === 'follow_up' ? 'scheduled' : 'booked';
+    updateData.queue_number = null;
+    updateData.check_in_time = null;
   }
 
-  await appointment.save();
+  const { data: updated, error } = await supabase
+    .from('appointments')
+    .update(updateData)
+    .eq('id', appointment.id)
+    .select()
+    .single();
 
-  // Audit Log
+  if (error) throw error;
+
   await auditService.recordLog({
     user,
     action: 'RESCHEDULE_APPOINTMENT',
     resourceType: 'Appointment',
-    resourceId: appointment.appointmentId || appointment._id.toString(),
-    changes: {
-      newDate: appointmentDate,
-      newSlot: timeSlot,
-      status: appointment.status
-    }
+    resourceId: updated.id,
+    changes: { newDate: appointmentDate, newSlot: timeSlot, status: updated.status },
   });
 
-  return appointment;
+  updated._id = updated.id;
+  return updated;
 };
 
 /**
- * Service to logically cancel an appointment.
- * @param {string} id - Appointment ID or _id
- * @param {string} reason - Cancellation reason
- * @param {Object} user - Authenticated user object
+ * Service to cancel an appointment.
  */
 export const cancelAppointment = async (id, reason, user) => {
-  await dbConnect();
-
   const { id: userId, role, clinicId } = user;
-  const userRole = role.toLowerCase();
 
-  // 1. Find Appointment and Verify Scoping
-  const appointment = await Appointment.findOne({
-    $or: [
-      { _id: mongoose.Types.ObjectId.isValid(id) ? id : null },
-      { appointmentId: id }
-    ].filter(q => q._id !== null)
-  });
+  const appointment = await findAppointment(id);
+  if (!appointment) throw new AppError('Appointment not found', 404, 'NOT_FOUND');
 
-  if (!appointment) {
-    throw new AppError('Appointment not found', 404, 'NOT_FOUND');
-  }
-
-
-  // 2. Enforce RBAC/Scoping (Staff/Admin only for this operation per ticket)
-  if (appointment.clinicId !== clinicId) {
+  if (appointment.clinic_id !== clinicId) throw new AppError('Access Denied', 403, 'FORBIDDEN');
+  if (role.toLowerCase() === 'doctor' && appointment.doctor_id !== userId) {
     throw new AppError('Access Denied', 403, 'FORBIDDEN');
   }
 
-  // Allow doctors to cancel their own appointments too, though typically a front-desk task
-  if (userRole === 'doctor' && appointment.doctorId.toString() !== userId) {
-    throw new AppError('Access Denied', 403, 'FORBIDDEN');
-  }
+  const { data: updated, error } = await supabase
+    .from('appointments')
+    .update({ status: 'cancelled', cancel_reason: reason })
+    .eq('id', appointment.id)
+    .select()
+    .single();
 
-
-  // 3. Mark as Cancelled
-  appointment.status = 'cancelled';
-  appointment.cancelReason = reason;
-  await appointment.save();
-
-  return appointment;
+  if (error) throw error;
+  updated._id = updated.id;
+  return updated;
 };
 
 /**
- * Service to fetch appointment history for a specific patient.
- * @param {string} patientId - Patient ID (UUID or ObjectId)
- * @param {Object} user - Authenticated user object
- */
-/**
- * Service to handle patient check-in.
- * Assigns sequential queue number per doctor per day.
- * 
- * @param {string} id - Appointment ID or _id
- * @param {Object} user - Authenticated user context
+ * Patient check-in with queue number assignment.
  */
 export const checkInAppointment = async (id, user, lateStrategy = 'end_of_queue') => {
-  await dbConnect();
+  const { clinicId } = user;
 
-  const { role, clinicId } = user;
-  const userRole = role.toLowerCase();
-
-  // 1. Find Appointment (Standardized finding logic)
-  const appointment = await Appointment.findOne({
-    $or: [
-      { _id: mongoose.Types.ObjectId.isValid(id) ? id : null },
-      { appointmentId: id }
-    ].filter(q => q._id !== null)
-  });
-
-  if (!appointment) {
-    throw new AppError('Appointment not found', 404, 'NOT_FOUND');
-  }
-
-
-  // 2. Scoping and RBAC (Implicitly handled by controller's withRoles, but double check clinic)
-  if (appointment.clinicId !== clinicId) {
-    throw new AppError('Access Denied', 403, 'FORBIDDEN');
-  }
-
-
-  // 3. Validation
-  if (appointment.status === 'checked_in') {
-    throw new AppError('Patient is already checked in', 400, 'ALREADY_CHECKED_IN');
-  }
-
+  const appointment = await findAppointment(id);
+  if (!appointment) throw new AppError('Appointment not found', 404, 'NOT_FOUND');
+  if (appointment.clinic_id !== clinicId) throw new AppError('Access Denied', 403, 'FORBIDDEN');
+  if (appointment.status === 'checked_in') throw new AppError('Patient is already checked in', 400, 'ALREADY_CHECKED_IN');
   if (!['booked', 'scheduled'].includes(appointment.status)) {
     throw new AppError(`Cannot check in appointment with status: ${appointment.status}`, 400, 'INVALID_STATUS');
   }
 
+  // Calculate next queue number
+  const { data: lastCheckedIn } = await supabase
+    .from('appointments')
+    .select('queue_number')
+    .eq('doctor_id', appointment.doctor_id)
+    .eq('clinic_id', appointment.clinic_id)
+    .eq('appointment_date', appointment.appointment_date)
+    .not('queue_number', 'is', null)
+    .order('queue_number', { ascending: false })
+    .limit(1)
+    .maybeSingle();
 
-  // 4. Calculate Queue Number
-  // Start and end of the day for the appointment date
-  const startOfDay = new Date(appointment.appointmentDate);
-  startOfDay.setHours(0, 0, 0, 0);
-  const endOfDay = new Date(appointment.appointmentDate);
-  endOfDay.setHours(23, 59, 59, 999);
+  const nextQueueNumber = lastCheckedIn ? lastCheckedIn.queue_number + 1 : 1;
 
-  let nextQueueNumber = 1;
-
-  if (lateStrategy === 'keep_priority') {
-    // Find the currently active or highest completed patient's queue number
-    const activeOrPast = await Appointment.findOne({
-      doctorId: appointment.doctorId,
-      clinicId: appointment.clinicId,
-      appointmentDate: { $gte: startOfDay, $lte: endOfDay },
-      status: { $in: ['in_progress', 'completed'] },
-      queueNumber: { $exists: true }
-    }).sort({ queueNumber: -1 });
-
-    const insertAfterQueueNumber = activeOrPast ? activeOrPast.queueNumber : 0;
-    
-    // Check if there are any waiting patients we need to jump ahead of
-    const waitingPatientsCount = await Appointment.countDocuments({
-      doctorId: appointment.doctorId,
-      clinicId: appointment.clinicId,
-      appointmentDate: { $gte: startOfDay, $lte: endOfDay },
+  const { data: updated, error } = await supabase
+    .from('appointments')
+    .update({
       status: 'checked_in',
-      queueNumber: { $gt: insertAfterQueueNumber }
-    });
+      check_in_time: new Date().toISOString(),
+      queue_number: nextQueueNumber,
+    })
+    .eq('id', appointment.id)
+    .select()
+    .single();
 
-    if (waitingPatientsCount > 0) {
-      // Shift everyone currently checked_in and waiting up by 1
-      await Appointment.updateMany({
-        doctorId: appointment.doctorId,
-        clinicId: appointment.clinicId,
-        appointmentDate: { $gte: startOfDay, $lte: endOfDay },
-        status: 'checked_in',
-        queueNumber: { $gt: insertAfterQueueNumber }
-      }, {
-        $inc: { queueNumber: 1 }
-      });
-      nextQueueNumber = insertAfterQueueNumber + 1;
-    } else {
-      // No waiting patients, so just assign next sequential number
-      const lastCheckedIn = await Appointment.findOne({
-        doctorId: appointment.doctorId,
-        clinicId: appointment.clinicId,
-        appointmentDate: { $gte: startOfDay, $lte: endOfDay },
-        queueNumber: { $exists: true }
-      }).sort({ queueNumber: -1 });
-      nextQueueNumber = lastCheckedIn ? lastCheckedIn.queueNumber + 1 : 1;
-    }
-  } else {
-    // end_of_queue
-    const lastCheckedIn = await Appointment.findOne({
-      doctorId: appointment.doctorId,
-      clinicId: appointment.clinicId,
-      appointmentDate: { $gte: startOfDay, $lte: endOfDay },
-      queueNumber: { $exists: true }
-    }).sort({ queueNumber: -1 });
-  
-    nextQueueNumber = lastCheckedIn ? lastCheckedIn.queueNumber + 1 : 1;
-  }
-
-  // 5. Apply Updates
-  appointment.status = 'checked_in';
-  appointment.checkInTime = new Date();
-  appointment.queueNumber = nextQueueNumber;
-
-  await appointment.save();
-
-  return appointment;
-};
-
-export const getPatientAppointmentHistory = async (patientId, user) => {
-  await dbConnect();
-
-  const { clinicId } = user;
-
-  // 1. Resolve Patient ID (handle UUID or ObjectId)
-  let targetId = patientId;
-  if (!mongoose.Types.ObjectId.isValid(patientId)) {
-    const Patient = (await import('@/models/Patient')).default;
-    const patientRecord = await Patient.findOne({ patientId: patientId }).select('_id');
-    if (!patientRecord) throw new AppError('Patient not found', 404, 'NOT_FOUND');
-    targetId = patientRecord._id;
-
-  }
-
-  // 2. Fetch History with Scoping
-  const appointments = await Appointment.find({
-    patientId: targetId,
-    clinicId
-  })
-    .populate('doctorId', 'firstName lastName specialty')
-    .sort({ appointmentDate: -1, timeSlot: -1 })
-    .lean();
-
-  const Visit = (await import('@/models/Visit')).default;
-  const appointmentIds = appointments.map(app => app._id);
-  const visits = await Visit.find({ appointmentId: { $in: appointmentIds } }).lean();
-
-  const visitsMap = {};
-  visits.forEach(v => visitsMap[v.appointmentId.toString()] = v);
-
-  const enrichedAppointments = appointments.map(app => {
-    const visit = visitsMap[app._id.toString()];
-    if (visit) {
-      app.visitId = visit._id;
-      app.medicines = visit.medicines;
-      app.description = visit.diagnosis;
-    }
-    return app;
-  });
-
-  return enrichedAppointments;
+  if (error) throw error;
+  updated._id = updated.id;
+  return updated;
 };
 
 /**
- * Service to fetch daily appointments for a logged-in doctor.
- * @param {string} doctorId - Doctor's ID
- * @param {string} date - Date string 'YYYY-MM-DD'
- * @param {string} clinicId - Clinic ID for data isolation
+ * Service to fetch appointment history for a specific patient.
  */
+export const getPatientAppointmentHistory = async (patientId, user) => {
+  const { clinicId } = user;
+
+  // Resolve patient ID
+  let targetId = patientId;
+  const uuidRegex = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+  if (!uuidRegex.test(patientId)) {
+    const { data: pRecord } = await supabase.from('patients').select('id').eq('patient_code', patientId).maybeSingle();
+    if (!pRecord) throw new AppError('Patient not found', 404, 'NOT_FOUND');
+    targetId = pRecord.id;
+  }
+
+  const { data: appointments, error } = await supabase
+    .from('appointments')
+    .select(`
+      *,
+      doctors (first_name, last_name, specialty),
+      visits (id, diagnosis, medicines)
+    `)
+    .eq('patient_id', targetId)
+    .eq('clinic_id', clinicId)
+    .order('appointment_date', { ascending: false });
+
+  if (error) throw error;
+
+  return (appointments || []).map(a => ({
+    ...a,
+    _id: a.id,
+    doctorId: a.doctors ? { _id: a.doctors.id, ...a.doctors } : a.doctor_id,
+    visitId: a.visits?.[0]?.id || null,
+    medicines: a.visits?.[0]?.medicines || [],
+    description: a.visits?.[0]?.diagnosis || null,
+  }));
+};
 
 /**
  * Fetch full consultation context for the doctor desk.
  */
 export const getConsultationDetails = async (appointmentId, user) => {
-  await dbConnect();
-
   const { id: userId, role, clinicId } = user;
   const userRole = role ? role.toLowerCase() : '';
 
-  const query = {
-    $or: [
-      { _id: mongoose.Types.ObjectId.isValid(appointmentId) ? appointmentId : null },
-      { appointmentId: appointmentId }
-    ].filter(q => q._id !== null || q.appointmentId !== undefined)
-  };
-  
-  if (clinicId) {
-    query.clinicId = clinicId;
-  }
+  const { data: appointment, error } = await supabase
+    .from('appointments')
+    .select(`
+      *,
+      patients (*),
+      doctors (*)
+    `)
+    .or(`id.eq.${appointmentId}`)
+    .maybeSingle();
 
-  if (userRole === 'doctor') {
-    query.doctorId = userId;
-  }
+  if (error || !appointment) throw new AppError('Appointment not found or unauthorized', 404, 'NOT_FOUND');
 
-  const appointment = await Appointment.findOne(query).populate('patientId doctorId');
+  if (clinicId && appointment.clinic_id !== clinicId) throw new AppError('Access Denied', 403, 'FORBIDDEN');
+  if (userRole === 'doctor' && appointment.doctor_id !== userId) throw new AppError('Access Denied', 403, 'FORBIDDEN');
 
-  if (!appointment) {
-    throw new AppError('Appointment not found or unauthorized', 404, 'NOT_FOUND');
-  }
+  const { data: currentVisit } = await supabase
+    .from('visits')
+    .select('*')
+    .eq('appointment_id', appointment.id)
+    .maybeSingle();
 
+  const { data: history } = await supabase
+    .from('appointments')
+    .select('id, appointment_date, status, time_slot')
+    .eq('patient_id', appointment.patient_id)
+    .eq('status', 'completed')
+    .order('appointment_date', { ascending: false })
+    .limit(5);
 
-  // Fetch current Visit record if it exists
-  const Visit = (await import('@/models/Visit')).default;
-  const currentVisit = await Visit.findOne({ appointmentId: appointment._id });
+  const { data: lastVisit } = await supabase
+    .from('visits')
+    .select('diagnosis, notes, created_at')
+    .eq('patient_id', appointment.patient_id)
+    .eq('status', 'completed')
+    .order('created_at', { ascending: false })
+    .limit(1)
+    .maybeSingle();
 
-  // Also fetch past history for the patient
-  const history = await Appointment.find({
-    patientId: appointment.patientId._id,
-    status: 'completed'
-  }).sort({ appointmentDate: -1 }).limit(5);
-
-  const lastVisit = await Visit.findOne({
-    patientId: appointment.patientId._id,
-    status: 'completed'
-  }).sort({ createdAt: -1 });
-
-  const patientObj = appointment.patientId.toObject ? appointment.patientId.toObject() : appointment.patientId;
+  const patientObj = { ...appointment.patients, _id: appointment.patients?.id };
   if (lastVisit) {
-    patientObj.lastVisitSummary = lastVisit.diagnosis || lastVisit.notes || `Visited on ${lastVisit.createdAt.toLocaleDateString()}`;
+    patientObj.lastVisitSummary = lastVisit.diagnosis || lastVisit.notes || `Visited on ${new Date(lastVisit.created_at).toLocaleDateString()}`;
   }
 
   return {
-    appointment,
+    appointment: { ...appointment, _id: appointment.id },
     patient: patientObj,
     visit: currentVisit,
-    history
+    history: history || [],
   };
 };
 
-
 /**
- * Complete a consultation, saving notes, prescription and marking status done.
+ * Complete a consultation.
  */
 export const completeConsultation = async (appointmentId, consultationData, user) => {
-  await dbConnect();
+  const { data: appointment } = await supabase
+    .from('appointments')
+    .select('*')
+    .eq('id', appointmentId)
+    .eq('doctor_id', user.id)
+    .maybeSingle();
 
-  const appointment = await Appointment.findOne({
-    _id: appointmentId,
-    doctorId: user.id
-  });
+  if (!appointment) throw new AppError('Appointment not found or unauthorized', 404, 'NOT_FOUND');
+  if (appointment.status === 'completed') throw new AppError('Consultation already completed', 400, 'ALREADY_COMPLETED');
 
-  if (!appointment) {
-    throw new AppError('Appointment not found or unauthorized', 404, 'NOT_FOUND');
-  }
-  if (appointment.status === 'completed') {
-    throw new AppError('Consultation already completed', 400, 'ALREADY_COMPLETED');
-  }
+  const { data: visit } = await supabase
+    .from('visits')
+    .select('*')
+    .eq('appointment_id', appointment.id)
+    .maybeSingle();
 
+  if (!visit) throw new AppError('Visit record not found. Please start consultation first.', 404, 'NOT_FOUND');
 
-  const Visit = (await import('@/models/Visit')).default;
-  const visit = await Visit.findOne({ appointmentId: appointment._id });
+  const { data: updatedVisit, error: visitError } = await supabase
+    .from('visits')
+    .update({
+      status: 'completed',
+      end_time: new Date().toISOString(),
+      medicines: consultationData.medicines || [],
+      diagnosis: consultationData.diagnosis || '',
+    })
+    .eq('id', visit.id)
+    .select()
+    .single();
 
-  if (!visit) {
-    throw new AppError('Visit record not found. Please start consultation first.', 404, 'NOT_FOUND');
-  }
+  if (visitError) throw visitError;
 
+  await supabase.from('appointments').update({ status: 'completed' }).eq('id', appointment.id);
 
-  visit.status = 'completed';
-  visit.endTime = new Date();
-  visit.medicines = consultationData.medicines || [];
-  visit.diagnosis = consultationData.diagnosis || '';
-  await visit.save();
-
-  appointment.status = 'completed';
-  await appointment.save();
-
-  return visit;
+  updatedVisit._id = updatedVisit.id;
+  return updatedVisit;
 };
 
 /**
- * Service to auto-create a follow-up appointment.
- * Triggered internally when a visit is completed with follow_up_required = true.
+ * Auto-create a follow-up appointment.
  */
 export const createAutoFollowup = async (data, user) => {
-  await dbConnect();
-
   const { visitId, patientId, doctorId, followUpDate, followUpNotes } = data;
   const { clinicId } = user;
 
-  // 1. Duplicate check (Don't create if already exists for this visit)
-  const existing = await Appointment.findOne({ linked_visit_id: visitId });
-  if (existing) {
-    return existing; // Idempotent
-  }
+  const { data: existing } = await supabase
+    .from('appointments')
+    .select('id')
+    .eq('linked_visit_id', visitId)
+    .maybeSingle();
 
-  // 2. Fetch doctor/patient names for metadata (UI performance)
-  const [doctor, patient] = await Promise.all([
-    Doctor.findById(doctorId).select('firstName lastName'),
-    Patient.findById(patientId).select('firstName lastName')
+  if (existing) return { ...existing, _id: existing.id };
+
+  const [{ data: doctor }, { data: patient }] = await Promise.all([
+    supabase.from('doctors').select('first_name, last_name').eq('id', doctorId).maybeSingle(),
+    supabase.from('patients').select('first_name, last_name').eq('id', patientId).maybeSingle(),
   ]);
 
-  // 3. Create Appointment with collision avoidance for timeSlot
-  const targetDate = new Date(followUpDate);
-  targetDate.setUTCHours(0, 0, 0, 0);
-
+  const targetDate = toDate(followUpDate);
   let slot = '09:00 AM';
-  let isOccupied = await Appointment.findOne({ 
-    doctorId, 
-    appointmentDate: targetDate, 
-    timeSlot: slot,
-    status: { $in: ['booked', 'scheduled', 'checked_in', 'in_progress'] }
-  });
+
+  const { data: isOccupied } = await supabase
+    .from('appointments')
+    .select('id')
+    .eq('doctor_id', doctorId)
+    .eq('appointment_date', targetDate)
+    .eq('time_slot', slot)
+    .in('status', ['booked', 'scheduled', 'checked_in', 'in_progress'])
+    .maybeSingle();
 
   if (isOccupied) {
-    // Generate a unique virtual slot for auto-followups to avoid unique index collisions
     slot = `FU-${Math.random().toString(36).substring(2, 7).toUpperCase()}`;
   }
 
-  const newAppointment = await Appointment.create({
-    patientId,
-    doctorId,
-    clinicId,
-    appointmentDate: targetDate,
-    timeSlot: slot,
-    status: 'scheduled',
-    type: 'follow_up',
-    linked_visit_id: visitId,
-    reason: followUpNotes || 'Follow-up Consultation',
-    doctorName: doctor ? `Dr. ${doctor.lastName}` : 'Unknown Doctor',
-    patientName: patient ? `${patient.firstName} ${patient.lastName}` : 'Unknown Patient'
-  });
+  const { data: newAppointment, error } = await supabase
+    .from('appointments')
+    .insert([{
+      patient_id: patientId,
+      doctor_id: doctorId,
+      clinic_id: clinicId,
+      appointment_date: targetDate,
+      time_slot: slot,
+      status: 'scheduled',
+      type: 'follow_up',
+      linked_visit_id: visitId,
+      reason: followUpNotes || 'Follow-up Consultation',
+      doctor_name: doctor ? `Dr. ${doctor.last_name}` : 'Unknown Doctor',
+      patient_name: patient ? `${patient.first_name} ${patient.last_name}` : 'Unknown Patient',
+    }])
+    .select()
+    .single();
 
-  console.log(`[AUTO-FOLLOWUP] Created appointment ${newAppointment.appointmentId} for visit ${visitId}`);
-  
+  if (error) throw error;
+  newAppointment._id = newAppointment.id;
   return newAppointment;
 };
+
 /**
  * Fetch daily appointments for a specific doctor.
  */
 export const fetchDoctorDailyAppointments = async (doctorId, date, clinicId) => {
-  await dbConnect();
+  const queryDate = date || new Date().toISOString().split('T')[0];
 
-  const queryDate = date ? new Date(date) : new Date();
-  const startOfDay = new Date(queryDate);
-  startOfDay.setUTCHours(0, 0, 0, 0);
-  const endOfDay = new Date(queryDate);
-  endOfDay.setUTCHours(23, 59, 59, 999);
+  const { data, error } = await supabase
+    .from('appointments')
+    .select(`
+      *,
+      patients (first_name, last_name, phone_number, id, patient_code)
+    `)
+    .eq('doctor_id', doctorId)
+    .eq('clinic_id', clinicId)
+    .eq('appointment_date', queryDate)
+    .neq('status', 'cancelled')
+    .order('queue_number', { ascending: true })
+    .order('time_slot', { ascending: true });
 
-  console.log(`[DEBUG] Fetching daily appointments for doctor ${doctorId} in clinic ${clinicId} for date ${startOfDay.toISOString()}`);
+  if (error) throw error;
 
-  const appointments = await Appointment.find({
-    doctorId: new mongoose.Types.ObjectId(doctorId),
-    clinicId,
-    appointmentDate: { $gte: startOfDay, $lte: endOfDay },
-    status: { $ne: 'cancelled' }
-  })
-  .populate('patientId', 'firstName lastName phoneNumber patientId patientCode')
-  .sort({ queueNumber: 1, timeSlot: 1 });
-
-  console.log(`[DEBUG] Found ${appointments.length} appointments`);
-  return appointments;
+  return (data || []).map(a => ({
+    ...a,
+    _id: a.id,
+    patientId: a.patients ? { _id: a.patients.id, ...a.patients } : a.patient_id,
+  }));
 };

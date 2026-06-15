@@ -1,24 +1,15 @@
+/**
+ * onelogin/route.js - Unified login endpoint. Migrated from Mongoose to Supabase.
+ * The API contract is IDENTICAL to the original. The frontend sends the same request.
+ */
 import { ApiResponse } from '@/utils/apiResponse';
 import { generateToken } from '@/utils/generateToken';
 import { rateLimit } from '@/utils/rateLimit';
-
-import dbConnect from '@/utils/db';
-import Admin from '@/models/Admin';
-import Clinic from '@/models/Clinic';
-import Doctor from '@/models/Doctor';
-import Patient from '@/models/Patient';
-import Receptionist from '@/models/Staff';
+import { supabase } from '@/lib/supabase';
 import bcrypt from 'bcryptjs';
-import jwt from 'jsonwebtoken';
 import { loginSchema } from '@/validations/userValidation';
 import { withErrorHandler } from '@/utils/apiHandler';
 import { ROLES } from '@/constants/roles';
-
-const JWT_SECRET = process.env.JWT_SECRET;
-
-if (!JWT_SECRET) {
-  throw new Error('[AUTH ERROR] JWT_SECRET is not defined in environment variables.');
-}
 
 /**
  * @swagger
@@ -32,7 +23,7 @@ export const POST = withErrorHandler(async (req) => {
   const ip = req.headers.get('x-forwarded-for') || '127.0.0.1';
   const isDev = process.env.NODE_ENV === 'development';
   const limiter = await rateLimit(ip, { limit: isDev ? 100 : 10, windowMs: 15 * 60 * 1000, endpoint: 'onelogin' });
-  
+
   if (!limiter.success) {
     return ApiResponse.error(
       'Too many login attempts. Please try again later.',
@@ -42,119 +33,80 @@ export const POST = withErrorHandler(async (req) => {
     );
   }
 
-  await dbConnect();
   let body;
   try {
     body = await req.json();
   } catch (e) {
-    console.error('[LOGIN ERROR] Failed to parse JSON body');
     return ApiResponse.error('Invalid JSON body', 'JSON_ERROR', [], 400);
   }
-  
-
 
   const parsed = loginSchema.safeParse(body);
   if (!parsed.success) {
-    return ApiResponse.error(
-      'Validation failed',
-      'VALIDATION_ERROR',
-      parsed.error.format(),
-      400
-    );
+    return ApiResponse.error('Validation failed', 'VALIDATION_ERROR', parsed.error.format(), 400);
   }
 
   const { email, password } = parsed.data;
+  const cleanEmail = email.trim().toLowerCase();
 
-  const userModels = [
+  // Search across all user tables in Supabase
+  const tableLookup = [
     {
-      model: Admin,
+      table: 'admins',
       type: ROLES.ADMIN,
-      format: (user) => ({
-        id: user._id,
-        name: user.name || "Admin",
-        email: user.email,
-        role: ROLES.ADMIN,
-      }),
+      format: (u) => ({ id: u.id, name: u.name || 'Admin', email: u.email, role: ROLES.ADMIN }),
+      getClinicId: () => null,
     },
     {
-      model: Clinic,
+      table: 'clinics',
       type: ROLES.CLINIC,
-      format: (user) => ({
-        id: user._id,
-        name: user.clinicName,
-        email: user.email,
-        logo: user.logo,
-        status: user.status,
-        role: ROLES.CLINIC,
-      }),
+      format: (u) => ({ id: u.id, name: u.clinic_name, email: u.email, logo: u.logo, status: u.status, role: ROLES.CLINIC }),
+      getClinicId: (u) => u.id,
     },
     {
-      model: Doctor,
+      table: 'doctors',
       type: ROLES.DOCTOR,
-      format: (user) => ({
-        id: user._id,
-        name: `${user.firstName} ${user.lastName}`,
-        email: user.email,
-        role: ROLES.DOCTOR,
-      }),
+      format: (u) => ({ id: u.id, name: `${u.first_name} ${u.last_name}`, email: u.email, role: ROLES.DOCTOR }),
+      getClinicId: (u) => u.clinic_id,
     },
     {
-      model: Receptionist,
+      table: 'staff',
       type: ROLES.RECEPTIONIST,
-      format: (user) => ({
-        id: user._id,
-        name: `${user.firstName} ${user.lastName}`,
-        email: user.email,
-        role: ROLES.RECEPTIONIST,
-      }),
+      format: (u) => ({ id: u.id, name: `${u.first_name} ${u.last_name}`, email: u.email, role: ROLES.RECEPTIONIST }),
+      getClinicId: (u) => u.clinic_id,
     },
     {
-      model: Patient,
+      table: 'patients',
       type: ROLES.PATIENT,
-      format: (user) => ({
-        id: user._id,
-        name: `${user.firstName} ${user.lastName}`,
-        email: user.email,
-        role: ROLES.PATIENT,
-      }),
+      format: (u) => ({ id: u.id, name: `${u.first_name} ${u.last_name}`, email: u.email, role: ROLES.PATIENT }),
+      getClinicId: (u) => u.clinic_id,
     },
   ];
 
-
-
-  const cleanEmail = email.trim().toLowerCase();
   let found = null;
-
-
-  for (const modelInfo of userModels) {
+  for (const lookup of tableLookup) {
     try {
-      if (!modelInfo.model) {
-        console.error(`[LOGIN ERROR] Model for ${modelInfo.type} is undefined!`);
-        continue;
-      }
-      
-      const user = await modelInfo.model.findOne({ 
-        email: { $regex: `^${cleanEmail.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}$`, $options: 'i' } 
-      }).lean();
+      const { data: user } = await supabase
+        .from(lookup.table)
+        .select('*')
+        .ilike('email', cleanEmail)
+        .maybeSingle();
 
       if (user) {
-
-        found = { user, format: modelInfo.format, type: modelInfo.type };
-        break; // Stop at first match
+        found = { user, ...lookup };
+        break;
       }
     } catch (err) {
-      console.error(`[LOGIN ERROR] Exception scanning ${modelInfo.type}:`, err.message);
+      console.error(`[LOGIN ERROR] Exception scanning ${lookup.type}:`, err.message);
     }
   }
 
   if (!found) {
-
     return ApiResponse.error('User not found', 'USER_NOT_FOUND', [], 404);
   }
 
-  const { user, format, type } = found;
+  const { user, format, type, getClinicId } = found;
 
-  // Smart password comparison: Detect if stored password is a bcrypt hash
+  // Password comparison (bcrypt or plain for legacy data)
   const storedPassword = user.password || '';
   const isBcryptHash = storedPassword.startsWith('$2');
   const isMatch = isBcryptHash
@@ -166,11 +118,8 @@ export const POST = withErrorHandler(async (req) => {
   }
 
   try {
-    const tokens = generateToken(
-      user, 
-      user.role || type, 
-      type === ROLES.CLINIC ? user._id.toString() : user.clinicId
-    );
+    const clinicId = getClinicId(user);
+    const tokens = generateToken(user, type, clinicId);
 
     const { createSession } = await import('@/utils/sessionHelper');
     await createSession(req, user, tokens);
@@ -185,7 +134,7 @@ export const POST = withErrorHandler(async (req) => {
       secure: process.env.NODE_ENV === 'production',
       sameSite: 'strict',
       path: '/',
-      maxAge: 7 * 24 * 60 * 60, // 7 days
+      maxAge: 7 * 24 * 60 * 60,
     });
 
     return response;

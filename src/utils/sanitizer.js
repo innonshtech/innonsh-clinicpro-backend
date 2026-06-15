@@ -1,8 +1,11 @@
-import mongoSanitize from 'mongo-sanitize';
 import xss from 'xss';
 
 /**
- * Deep sanitization of objects/arrays to prevent NoSQL injection and XSS.
+ * Deep sanitization of objects/arrays to prevent SQL injection and XSS.
+ * mongo-sanitize has been removed since we are no longer using MongoDB.
+ * SQL injection is prevented by Supabase's parameterized queries.
+ * We keep XSS sanitization to protect HTML output.
+ *
  * @param {any} data - The data to sanitize
  * @returns {any} - The sanitized data
  */
@@ -24,13 +27,10 @@ export const sanitizeData = (data) => {
     const sanitizedObj = {};
     for (const key in data) {
       if (Object.prototype.hasOwnProperty.call(data, key)) {
-        // First remove prohibited mongo keys starting with '$'
-        const cleanKey = key.replace(/^\$/, '');
-        sanitizedObj[cleanKey] = sanitizeData(data[key]);
+        sanitizedObj[key] = sanitizeData(data[key]);
       }
     }
-    // Also use the robust mongo-sanitize which strips keys containing '$' 
-    return mongoSanitize(sanitizedObj);
+    return sanitizedObj;
   }
 
   return data;

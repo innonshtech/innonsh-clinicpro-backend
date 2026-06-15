@@ -7,9 +7,19 @@
     "build": "next build",
     "start": "next start",
     "lint": "next lint",
-    "test": "jest"
+    "test": "jest",
+    "migrate:clinics": "npx ts-node --project tsconfig.migrate.json scripts/migrate/migrate-clinics.ts",
+    "migrate:users": "npx ts-node --project tsconfig.migrate.json scripts/migrate/migrate-users.ts",
+    "migrate:doctors": "npx ts-node --project tsconfig.migrate.json scripts/migrate/migrate-doctors.ts",
+    "migrate:patients": "npx ts-node --project tsconfig.migrate.json scripts/migrate/migrate-patients.ts",
+    "migrate:appointments": "npx ts-node --project tsconfig.migrate.json scripts/migrate/migrate-appointments.ts",
+    "migrate:visits": "npx ts-node --project tsconfig.migrate.json scripts/migrate/migrate-visits.ts",
+    "migrate:billings": "npx ts-node --project tsconfig.migrate.json scripts/migrate/migrate-billings.ts",
+    "migrate:auditlogs": "npx ts-node --project tsconfig.migrate.json scripts/migrate/migrate-auditlogs.ts",
+    "migrate:all": "npm run migrate:clinics && npm run migrate:users && npm run migrate:doctors && npm run migrate:patients && npm run migrate:appointments && npm run migrate:visits && npm run migrate:billings && npm run migrate:auditlogs"
   },
   "dependencies": {
+    "@supabase/supabase-js": "^2.108.2",
     "@upstash/ratelimit": "^2.0.8",
     "@upstash/redis": "^1.38.0",
     "bcryptjs": "^3.0.2",

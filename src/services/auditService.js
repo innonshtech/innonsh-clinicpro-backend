@@ -1,5 +1,8 @@
-import AuditLog from '@/models/AuditLog';
-import dbConnect from '@/utils/db';
+/**
+ * auditService.js - Audit log management via Supabase.
+ * Replaces the old Mongoose AuditLog model.
+ */
+import { supabase } from '@/lib/supabase';
 
 /**
  * Service to record an audit log entry.
@@ -7,27 +10,21 @@ import dbConnect from '@/utils/db';
  */
 export const recordLog = async (logData) => {
   try {
-    await dbConnect();
-    
-    // We don't await this if we want it to be fire-and-forget, 
-    // but for legal/audit it's better to ensure it's saved.
-    const log = await AuditLog.create({
-      userId: logData.user.id,
-      userRole: logData.user.role,
-      userName: logData.user.name || 'Unknown',
+    await supabase.from('audit_logs').insert([{
+      user_id: logData.user.id || logData.user._id || logData.user.userId,
+      user_role: logData.user.role,
+      user_name: logData.user.name || 'Unknown',
       action: logData.action,
-      resourceType: logData.resourceType,
-      resourceId: logData.resourceId,
-      clinicId: logData.user.clinicId,
-      changes: logData.changes || {},
-      metadata: logData.metadata || {}
-    });
-    
-    return log;
+      resource_type: logData.resourceType,
+      resource_id: logData.resourceId,
+      clinic_id: logData.user.clinicId,
+      changes_before: logData.changes?.before || null,
+      changes_after: logData.changes?.after || logData.changes || null,
+      metadata: logData.metadata || null,
+    }]);
   } catch (error) {
-    // We don't want an audit failure to crash the main request, but we should log it
-    console.error('[AUDIT ERROR] Failed to record audit log:', error);
-    return null;
+    // We don't want an audit failure to crash the main request
+    console.error('[AUDIT ERROR] Failed to record audit log:', error.message);
   }
 };
 
@@ -35,23 +32,26 @@ export const recordLog = async (logData) => {
  * Fetch logs for a specific clinic (Admin use)
  */
 export const getClinicLogs = async (clinicId, filters = {}) => {
-  await dbConnect();
   const { resourceType, action, page = 1, limit = 20 } = filters;
-  
-  const query = { clinicId };
-  if (resourceType) query.resourceType = resourceType;
-  if (action) query.action = action;
 
-  const logs = await AuditLog.find(query)
-    .sort({ createdAt: -1 })
-    .skip((page - 1) * limit)
-    .limit(limit);
+  let req = supabase
+    .from('audit_logs')
+    .select('*', { count: 'exact' })
+    .eq('clinic_id', clinicId)
+    .order('created_at', { ascending: false });
 
-  const total = await AuditLog.countDocuments(query);
+  if (resourceType) req = req.eq('resource_type', resourceType);
+  if (action) req = req.eq('action', action);
+
+  const from = (page - 1) * limit;
+  req = req.range(from, from + limit - 1);
+
+  const { data: logs, error, count } = await req;
+  if (error) throw error;
 
   return {
-    logs,
-    total,
-    totalPages: Math.ceil(total / limit)
+    logs: logs || [],
+    total: count || 0,
+    totalPages: Math.ceil((count || 0) / limit),
   };
 };
