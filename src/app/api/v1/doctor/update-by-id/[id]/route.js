@@ -1,8 +1,7 @@
 // app/api/doctors/[id]/route.js
 
 import { ApiResponse } from '@/utils/apiResponse';
-import Doctor from '@/models/Doctor';
-import dbConnect from '@/utils/db';
+import { supabase } from '@/lib/supabase';
 import bcrypt from 'bcryptjs';
 import { doctorUpdateSchema } from '@/validations/userValidation';
 import { withErrorHandler } from '@/utils/apiHandler';
@@ -30,7 +29,6 @@ import { withRoles } from '@/utils/authGuard';
  */
 export const PUT = withErrorHandler(
   withRoles(['admin', 'doctor', 'clinic'], async (req, { params }) => {
-    await dbConnect();
     const resolvedParams = await params;
     const { id } = resolvedParams;
     const body = await req.json();
@@ -51,14 +49,33 @@ export const PUT = withErrorHandler(
       updates.password = await bcrypt.hash(updates.password, 12);
     }
 
-    const updatedDoctor = await Doctor.findByIdAndUpdate(id, updates, {
-      new: true,
-      runValidators: true,
-    });
+    // Convert camelCase to snake_case for Supabase
+    const mappedUpdates = Object.fromEntries(
+      Object.entries(updates).map(([k, v]) => [
+        k.replace(/([A-Z])/g, '_$1').toLowerCase(),
+        v
+      ])
+    );
+
+    const { data: updatedDoctor, error } = await supabase
+      .from('doctors')
+      .update(mappedUpdates)
+      .eq('id', id)
+      .select()
+      .maybeSingle();
+
+    if (error) {
+      console.error('Supabase update error:', error);
+      throw error;
+    }
 
     if (!updatedDoctor) {
       return ApiResponse.error('Doctor not found', 'USER_NOT_FOUND', [], 404);
     }
+
+    // Preserve legacy ID for frontend
+    updatedDoctor._id = updatedDoctor.id;
+    delete updatedDoctor.password;
 
     return ApiResponse.success({ doctor: updatedDoctor }, 'Doctor updated successfully');
   })

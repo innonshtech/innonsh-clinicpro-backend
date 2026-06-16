@@ -1,6 +1,5 @@
 import { ApiResponse } from '@/utils/apiResponse';
-import Clinic from '@/models/Clinic';
-import dbConnect from '@/utils/db';
+import { supabase } from '@/lib/supabase';
 
 /**
  * @swagger
@@ -24,8 +23,7 @@ import dbConnect from '@/utils/db';
  */
 export async function PUT(req, { params }) {
   try {
-    await dbConnect();
-    const { id } = params;
+    const { id } = await params;
     const { status, approved, rejectionReason } = await req.json();
 
     if (!id || !status) {
@@ -34,20 +32,30 @@ export async function PUT(req, { params }) {
 
     const updateData = { status };
 
-    if (approved !== undefined) {
-      updateData.approved = approved;
-    }
-
     if (rejectionReason) {
-      updateData.rejectionReason = rejectionReason;
+      updateData.rejection_reason = rejectionReason;
     }
 
-    const clinic = await Clinic.findByIdAndUpdate(id, updateData, { new: true });
+    const { data: clinic, error } = await supabase
+      .from('clinics')
+      .update(updateData)
+      .eq('id', id)
+      .select()
+      .maybeSingle();
+
+    if (error) throw error;
 
     if (!clinic) {
       return ApiResponse.error('Clinic not found', 'NOT_FOUND', [], 404);
     }
 
+    // Remap for frontend
+    clinic._id = clinic.id;
+    clinic.rejectionReason = clinic.rejection_reason;
+    clinic.clinicName = clinic.clinic_name;
+    clinic.clinicType = clinic.clinic_type;
+    clinic.approved = clinic.status === 'active';
+    
     return ApiResponse.success({ clinic }, 'Status updated successfully');
 
   } catch (error) {

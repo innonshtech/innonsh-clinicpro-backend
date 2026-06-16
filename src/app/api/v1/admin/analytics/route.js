@@ -1,27 +1,18 @@
-import { NextResponse } from 'next/server';
 import { ApiResponse } from '@/utils/apiResponse';
-import dbConnect from '@/utils/db';
-import Patient from '@/models/Patient';
-import Doctor from '@/models/Doctor';
-import Appointments from '@/models/Appointments';
-import Billing from '@/models/Billing';
+import { supabase } from '@/lib/supabase';
 import { withRoles } from '@/utils/authGuard';
 
 export const GET = withRoles(['admin'], async (req) => {
   try {
-    await dbConnect();
-
     // 1. Basic Stats
-    const totalPatients = await Patient.countDocuments();
-    const totalDoctors = await Doctor.countDocuments();
-    const totalAppointments = await Appointments.countDocuments();
-    
-    // Revenue
-    const revenueAggr = await Billing.aggregate([
-      { $match: { status: 'paid' } },
-      { $group: { _id: null, total: { $sum: "$totalAmount" } } }
+    const [{ count: totalPatients }, { count: totalDoctors }, { count: totalAppointments }, { data: billingData }] = await Promise.all([
+      supabase.from('patients').select('*', { count: 'exact', head: true }),
+      supabase.from('doctors').select('*', { count: 'exact', head: true }),
+      supabase.from('appointments').select('*', { count: 'exact', head: true }),
+      supabase.from('billings').select('total_amount').eq('status', 'paid')
     ]);
-    const totalRevenue = revenueAggr.length > 0 ? revenueAggr[0].total : 0;
+
+    const totalRevenue = (billingData || []).reduce((acc, curr) => acc + (curr.total_amount || 0), 0);
 
     const patientFlow = [];
     for (let i = 5; i >= 0; i--) {
@@ -30,28 +21,32 @@ export const GET = withRoles(['admin'], async (req) => {
       d.setMonth(new Date().getMonth() - i);
       const monthName = d.toLocaleString('default', { month: 'short' });
       
-      const startOfMonth = new Date(d.getFullYear(), d.getMonth(), 1);
-      const endOfMonth = new Date(d.getFullYear(), d.getMonth() + 1, 0);
+      const startOfMonth = new Date(d.getFullYear(), d.getMonth(), 1).toISOString();
+      const endOfMonth = new Date(d.getFullYear(), d.getMonth() + 1, 0).toISOString();
 
-      const pCount = await Patient.countDocuments({
-        createdAt: { $gte: startOfMonth, $lte: endOfMonth }
-      });
-      const aCount = await Appointments.countDocuments({
-        createdAt: { $gte: startOfMonth, $lte: endOfMonth }
-      });
+      const [{ count: pCount }, { count: aCount }] = await Promise.all([
+        supabase.from('patients').select('*', { count: 'exact', head: true }).gte('created_at', startOfMonth).lte('created_at', endOfMonth),
+        supabase.from('appointments').select('*', { count: 'exact', head: true }).gte('created_at', startOfMonth).lte('created_at', endOfMonth)
+      ]);
 
       patientFlow.push({
         month: monthName,
-        patients: pCount,
-        appointments: aCount
+        patients: pCount || 0,
+        appointments: aCount || 0
       });
     }
 
     // 3. Department Distribution
-    const deptDistribution = await Doctor.aggregate([
-      { $group: { _id: "$specialty", count: { $sum: 1 } } },
-      { $sort: { count: -1 } }
-    ]);
+    const { data: doctorsData } = await supabase.from('doctors').select('specialty');
+    const deptCount = {};
+    (doctorsData || []).forEach(doc => {
+      const spec = doc.specialty || 'General';
+      deptCount[spec] = (deptCount[spec] || 0) + 1;
+    });
+
+    const deptDistribution = Object.keys(deptCount)
+      .map(key => ({ _id: key, count: deptCount[key] }))
+      .sort((a, b) => b.count - a.count);
 
     const colors = ['#8B5CF6', '#06B6D4', '#10B981', '#F59E0B', '#EF4444'];
     const departmentStats = deptDistribution.map((d, i) => ({
@@ -60,42 +55,47 @@ export const GET = withRoles(['admin'], async (req) => {
       color: colors[i % colors.length]
     }));
 
-    // Convert values to percentages for pie chart display if needed
     const totalDocsForPie = departmentStats.reduce((acc, curr) => acc + curr.value, 0) || 1;
     departmentStats.forEach(d => {
       d.value = Math.round((d.value / totalDocsForPie) * 100);
     });
 
     // 4. Top Doctors (By most appointments)
-    const topDoctorsAggr = await Appointments.aggregate([
-      { $group: { _id: "$doctorId", appointmentCount: { $sum: 1 } } },
-      { $sort: { appointmentCount: -1 } },
-      { $limit: 4 }
-    ]);
+    const { data: allAppointments } = await supabase.from('appointments').select('doctor_id');
+    const doctorApptCount = {};
+    (allAppointments || []).forEach(app => {
+      if (app.doctor_id) {
+        doctorApptCount[app.doctor_id] = (doctorApptCount[app.doctor_id] || 0) + 1;
+      }
+    });
 
-    const topDoctors = await Promise.all(topDoctorsAggr.map(async (td) => {
-      const doc = await Doctor.findById(td._id);
+    const topDoctorIds = Object.keys(doctorApptCount)
+      .sort((a, b) => doctorApptCount[b] - doctorApptCount[a])
+      .slice(0, 4);
+
+    const topDoctors = await Promise.all(topDoctorIds.map(async (docId) => {
+      const { data: doc } = await supabase.from('doctors').select('first_name, last_name, specialty').eq('id', docId).maybeSingle();
       return {
-        id: td._id,
-        name: doc ? `Dr. ${doc.firstName} ${doc.lastName}` : 'Unknown',
+        id: docId,
+        name: doc ? `Dr. ${doc.first_name} ${doc.last_name}` : 'Unknown',
         specialty: doc ? doc.specialty : 'N/A',
-        appointments: td.appointmentCount,
+        appointments: doctorApptCount[docId],
         rating: (Math.random() * (5.0 - 4.2) + 4.2).toFixed(1) // simulated rating
       };
     }));
 
     // 5. Recent Activities
-    const recentAppointments = await Appointments.find()
-      .sort({ createdAt: -1 })
-      .limit(5)
-      .populate('doctorId')
-      .populate('patientId');
+    const { data: recentAppointmentsData } = await supabase
+      .from('appointments')
+      .select('id, created_at, patients:patient_id (first_name, last_name), doctors:doctor_id (last_name)')
+      .order('created_at', { ascending: false })
+      .limit(5);
 
-    const recentActivities = recentAppointments.map((app, index) => ({
-      id: app._id || index,
+    const recentActivities = (recentAppointmentsData || []).map((app, index) => ({
+      id: app.id || index,
       type: 'appointment',
-      message: `Appointment scheduled for ${app.patientId ? app.patientId.firstName : 'Patient'} with Dr. ${app.doctorId ? app.doctorId.lastName : 'Doctor'}`,
-      time: new Date(app.createdAt).toLocaleDateString(),
+      message: `Appointment scheduled for ${app.patients ? app.patients.first_name : 'Patient'} with Dr. ${app.doctors ? app.doctors.last_name : 'Doctor'}`,
+      time: new Date(app.created_at).toLocaleDateString(),
     }));
 
     return ApiResponse.success({

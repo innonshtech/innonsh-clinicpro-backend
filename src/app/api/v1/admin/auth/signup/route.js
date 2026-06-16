@@ -1,6 +1,5 @@
 import { ApiResponse } from "@/utils/apiResponse";
-import dbConnect from "@/utils/db";
-import Admin from "@/models/Admin";
+import { supabase } from "@/lib/supabase";
 import bcrypt from "bcryptjs";
 
 /**
@@ -19,11 +18,15 @@ import bcrypt from "bcryptjs";
  */
 export async function POST(req) {
   try {
-    await dbConnect();
     const { name, email, password, role, secret } = await req.json();
 
     // 1. Check if an admin already exists
-    const adminCount = await Admin.countDocuments();
+    const { count: adminCount, error: countErr } = await supabase
+      .from('admins')
+      .select('id', { count: 'exact', head: true });
+
+    if (countErr) throw countErr;
+
     if (adminCount > 0) {
       return ApiResponse.error("Admin already exists. Multiple admin registrations are disabled.", "FORBIDDEN", [], 403);
     }
@@ -34,15 +37,28 @@ export async function POST(req) {
       return ApiResponse.error("Invalid signup secret. Unauthorized admin creation.", "UNAUTHORIZED", [], 401);
     }
 
-    const userExists = await Admin.findOne({ email });
+    const { data: userExists, error: existErr } = await supabase
+      .from('admins')
+      .select('id')
+      .eq('email', email)
+      .maybeSingle();
+
+    if (existErr) throw existErr;
+
     if (userExists) {
       return ApiResponse.error("User already exists", "CONFLICT", [], 400);
     }
 
     const hashedPassword = await bcrypt.hash(password, 10);
-    const admin = await Admin.create({ name, email, password: hashedPassword, role });
+    const { data: admin, error: insertErr } = await supabase
+      .from('admins')
+      .insert({ name, email, password: hashedPassword, role })
+      .select('id')
+      .single();
 
-    return ApiResponse.success({ adminId: admin._id }, "Super Admin created successfully", 201);
+    if (insertErr) throw insertErr;
+
+    return ApiResponse.success({ adminId: admin.id }, "Super Admin created successfully", 201);
   } catch (error) {
     console.error("Admin signup error:", error);
     return ApiResponse.error("Internal Server Error", "SERVER_ERROR", error.message, 500);

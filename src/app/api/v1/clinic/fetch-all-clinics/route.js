@@ -1,6 +1,5 @@
 import { ApiResponse } from '@/utils/apiResponse';
-import dbConnect from '@/utils/db';
-import Clinic from '@/models/Clinic';
+import { supabase } from '@/lib/supabase';
 
 /**
  * GET: Fetch all registered clinics
@@ -21,9 +20,23 @@ import Clinic from '@/models/Clinic';
  */
 export async function GET() {
   try {
-    await dbConnect();
+    const { data: clinicsData, error } = await supabase
+      .from('clinics')
+      .select('id, clinic_name, email, phone, address, city, clinic_type, status, registration_number, created_at, updated_at, images');
 
-    const clinics = await Clinic.find().select('-password');
+    if (error) throw error;
+
+    const clinics = (clinicsData || []).map(clinic => ({
+      ...clinic,
+      _id: clinic.id,
+      clinicName: clinic.clinic_name,
+      clinicType: clinic.clinic_type,
+      approved: clinic.status === 'active',
+      registrationNumber: clinic.registration_number,
+      imageUrls: clinic.images,
+      createdAt: clinic.created_at,
+      updatedAt: clinic.updated_at
+    }));
 
     return ApiResponse.success({ clinics }, 'Clinics fetched successfully');
   } catch (error) {

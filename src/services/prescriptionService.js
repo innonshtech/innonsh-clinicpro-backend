@@ -1,54 +1,55 @@
-import Visit from '@/models/Visit';
-import Appointment from '@/models/Appointments';
-import dbConnect from '@/utils/db';
-import mongoose from 'mongoose';
+import { supabase } from '@/lib/supabase';
 import AppError from '@/utils/AppError';
 import * as auditService from '@/services/auditService';
-
 
 /**
  * Service to add a prescription to an ongoing or completed visit.
  */
 export const addPrescription = async (payload, user) => {
-  await dbConnect();
   const { visit_id, medicines } = payload;
   
-  const query = mongoose.Types.ObjectId.isValid(visit_id) 
-    ? { _id: visit_id } 
-    : null;
+  if (!visit_id) throw new AppError('Invalid Visit ID format', 400, 'INVALID_ID');
+
+  const { data: visit, error: visitError } = await supabase
+    .from('visits')
+    .select('*')
+    .eq('id', visit_id)
+    .single();
     
-  if (!query) throw new AppError('Invalid Visit ID format', 400, 'INVALID_ID');
+  if (visitError || !visit) throw new AppError('Visit not found', 404, 'NOT_FOUND');
 
-
-  const visit = await Visit.findOne(query);
-  
-  if (!visit) throw new AppError('Visit not found', 404, 'NOT_FOUND');
-
-  
   // Enforce Scoping
-  if (user.role.toLowerCase() === 'doctor' && visit.doctorId.toString() !== user.id) {
+  if (user.role.toLowerCase() === 'doctor' && visit.doctor_id !== user.id) {
     throw new AppError('Access Denied', 403, 'FORBIDDEN');
   }
 
-
   // Update medicines array
-  visit.medicines = medicines;
-  await visit.save();
+  const { error: updateVisitError } = await supabase
+    .from('visits')
+    .update({ medicines })
+    .eq('id', visit.id);
+    
+  if (updateVisitError) throw new AppError('Failed to update visit', 500, 'DB_ERROR');
 
   // Also update the underlying appointment so the legacy history views keep working instantly
-  await Appointment.updateOne(
-    { _id: visit.appointmentId },
-    { $set: { medicines: medicines } }
-  );
+  if (visit.appointment_id) {
+    await supabase
+      .from('appointments')
+      .update({ medicines })
+      .eq('id', visit.appointment_id);
+  }
+
+  visit.medicines = medicines;
+  visit._id = visit.id;
 
   // Audit Log
   await auditService.recordLog({
     user,
     action: 'CREATE_PRESCRIPTION',
     resourceType: 'Visit',
-    resourceId: visit._id.toString(),
+    resourceId: visit.id,
     changes: {
-      medicinesCount: medicines.length
+      medicinesCount: (medicines || []).length
     }
   });
 

@@ -188,7 +188,7 @@ export const getPatientVisitHistory = async (patientId, user) => {
     .select(`
       *,
       doctors (first_name, last_name, specialty, phone),
-      appointments (appointment_date, time_slot, reason)
+      appointments!fk_visit_appointment(appointment_date, time_slot, reason)
     `)
     .eq('patient_id', targetId)
     .order('start_time', { ascending: false });
@@ -198,7 +198,21 @@ export const getPatientVisitHistory = async (patientId, user) => {
   return (data || []).map(v => ({
     ...v,
     _id: v.id,
-    doctorId: v.doctors ? { _id: v.doctors.id, ...v.doctors } : v.doctor_id,
-    appointmentId: v.appointments ? { _id: v.appointments.id, ...v.appointments } : v.appointment_id,
+    startTime: v.start_time,
+    endTime: v.end_time,
+    clinicalNotes: v.notes,
+    followUpDate: v.follow_up_date,
+    doctorId: v.doctors ? { 
+      _id: v.doctors.id, 
+      ...v.doctors,
+      firstName: v.doctors.first_name,
+      lastName: v.doctors.last_name
+    } : v.doctor_id,
+    appointmentId: v.appointments ? { 
+      _id: v.appointments.id, 
+      ...v.appointments,
+      appointmentDate: v.appointments.appointment_date,
+      timeSlot: v.appointments.time_slot
+    } : v.appointment_id,
   }));
 };

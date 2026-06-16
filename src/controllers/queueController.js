@@ -1,12 +1,12 @@
 import { ApiResponse } from '@/utils/apiResponse';
 import * as queueService from '@/services/queueService';
-import dbConnect from '@/utils/db';
+
 
 /**
  * Controller to handle fetching the live doctor queue.
  */
 export const getDoctorQueue = async (req, { params }) => {
-  await dbConnect();
+  
   const { id: doctorId } = await params;
 
   if (!doctorId) {

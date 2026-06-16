@@ -1,16 +1,13 @@
 import { ApiResponse } from '@/utils/apiResponse';
 import * as billingService from '@/services/billingService';
 import { billingCreateSchema, billingListQuerySchema, billingRefundSchema, billingPaymentSchema } from '@/validations/userValidation';
-import dbConnect from '@/utils/db';
-import Patient from '@/models/Patient';
-import Counter from '@/models/Counter';
-import Billing from '@/models/Billing';
+
 
 /**
  * Controller to handle creating a new bill/invoice.
  */
 export const createBilling = async (req) => {
-  await dbConnect();
+  
   
   const body = await req.json();
 
@@ -61,7 +58,7 @@ export const createBilling = async (req) => {
  * Controller to handle fetching a single invoice by ID.
  */
 export const getInvoice = async (req, { params }) => {
-  await dbConnect();
+  
   const { id } = await params;
 
   if (!id) {
@@ -99,7 +96,7 @@ export const getInvoice = async (req, { params }) => {
  * Controller to handle fetching a list of invoices with filters.
  */
 export const listBills = async (req) => {
-  await dbConnect();
+  
   
   const { searchParams } = new URL(req.url);
   const query = Object.fromEntries(searchParams.entries());
@@ -112,31 +109,6 @@ export const listBills = async (req) => {
   }
 
   try {
-    // RUN SYNC MIGRATION FOR PATIENTS
-    const patientsToMigrate = await Patient.find({ patientCode: { $exists: false } });
-    for (const p of patientsToMigrate) {
-      const counter = await Counter.findByIdAndUpdate(
-        { _id: 'patient_code' },
-        { $inc: { seq: 1 } },
-        { new: true, upsert: true }
-      );
-      p.patientCode = `PAT-${String(counter.seq).padStart(6, '0')}`;
-      await p.save();
-    }
-
-    // RUN SYNC MIGRATION FOR INVOICES
-    const billsToMigrate = await Billing.find({ billingId: { $exists: false } });
-    const currentYear = new Date().getFullYear();
-    for (const b of billsToMigrate) {
-      const counter = await Counter.findByIdAndUpdate(
-        { _id: `invoice_seq_${currentYear}` },
-        { $inc: { seq: 1 } },
-        { new: true, upsert: true }
-      );
-      b.billingId = `INV-${currentYear}-${String(counter.seq).padStart(4, '0')}`;
-      await b.save();
-    }
-
     // 2. Call service
     const data = await billingService.getBillingHistory(parsed.data, req.user);
 
@@ -168,7 +140,7 @@ export const listBills = async (req) => {
  * Controller to handle billing refunds.
  */
 export const processRefund = async (req, { params }) => {
-  await dbConnect();
+  
   const { id } = await params;
   
   const body = await req.json();
@@ -218,7 +190,7 @@ export const processRefund = async (req, { params }) => {
  * Controller to handle billing payments.
  */
 export const processPayment = async (req, { params }) => {
-  await dbConnect();
+  
   const { id } = await params;
   
   const body = await req.json();

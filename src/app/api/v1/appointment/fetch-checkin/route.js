@@ -1,7 +1,5 @@
 import { ApiResponse } from '@/utils/apiResponse';
-import dbConnect from '@/utils/db';
-import Appointment from '@/models/Appointments';
-import Doctor from '@/models/Doctor';
+import { supabase } from '@/lib/supabase';
 
 // GET: /api/v1/appointment/fetch-checkin
 /**
@@ -20,26 +18,35 @@ import Doctor from '@/models/Doctor';
  */
 export async function GET() {
   try {
-    await dbConnect();
+    const { data: appointmentsData, error } = await supabase
+      .from('appointments')
+      .select(`
+        *,
+        doctors (id, first_name, last_name, specialty, email, phone, clinic_id)
+      `)
+      .not('medicines', 'is', null);
 
-    const appointments = await Appointment.find({
-      medicines: { $exists: true, $ne: [] }
-    });
+    if (error) throw error;
 
-    // Manually add doctor details to each appointment
-    const appointmentsWithDoctor = await Promise.all(
-      appointments.map(async (appointment) => {
-        const doctor = await Doctor.findById(appointment.doctorId).select("-password").lean();
-        return {
-          ...appointment.toObject(),
-          doctorDetails: doctor || null
-        };
-      })
+    // Filter where medicines is an array and not empty
+    const appointments = (appointmentsData || []).filter(
+      (a) => Array.isArray(a.medicines) && a.medicines.length > 0
     );
+
+    // Map to match original mongoose output
+    const appointmentsWithDoctor = appointments.map((appointment) => {
+      return {
+        ...appointment,
+        _id: appointment.id,
+        appointmentDate: appointment.appointment_date,
+        timeSlot: appointment.time_slot,
+        doctorDetails: appointment.doctors ? { ...appointment.doctors, _id: appointment.doctors.id } : null
+      };
+    });
 
     return ApiResponse.success({ appointments: appointmentsWithDoctor }, "Checked-in appointments fetched successfully");
   } catch (error) {
-    console.error('Error fetching clinic images:', error);
+    console.error('Error fetching checked-in appointments:', error);
     return ApiResponse.error('Server error', 'SERVER_ERROR', error.message, 500);
   }
 }

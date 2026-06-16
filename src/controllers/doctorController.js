@@ -1,13 +1,13 @@
 import * as doctorService from '@/services/doctorService';
 import { ApiResponse } from '@/utils/apiResponse';
 import { doctorAvailabilitySchema } from '@/validations/userValidation';
-import dbConnect from '@/utils/db';
+
 
 /**
  * Controller to set doctor availability.
  */
 export const setAvailability = async (req) => {
-  await dbConnect();
+  
   const body = await req.json();
 
   // 1. Validate request
@@ -49,7 +49,7 @@ export const setAvailability = async (req) => {
  * Controller to fetch available slots for a doctor.
  */
 export const getAvailability = async (req) => {
-  await dbConnect();
+  
   
   // 1. Extract query params
   const { searchParams } = new URL(req.url);

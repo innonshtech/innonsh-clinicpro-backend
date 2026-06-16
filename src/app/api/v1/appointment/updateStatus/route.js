@@ -1,7 +1,4 @@
 import { ApiResponse } from '@/utils/apiResponse';
-import dbConnect from '@/utils/db';
-import Appointment from '@/models/Appointments';
-import mongoose from 'mongoose';
 import * as appointmentService from '@/services/appointmentService';
 import { withRoles } from '@/utils/authGuard';
 import { withErrorHandler } from '@/utils/apiHandler';
@@ -24,11 +21,10 @@ import { withErrorHandler } from '@/utils/apiHandler';
 export const PATCH = withErrorHandler(
   withRoles(['admin', 'receptionist', 'doctor'], async (req) => {
     try {
-      await dbConnect();
       const { appointmentId, status } = await req.json();
 
       // Validate input
-      if (!appointmentId || !mongoose.Types.ObjectId.isValid(appointmentId)) {
+      if (!appointmentId) {
         return ApiResponse.error("Invalid appointment ID", "INVALID_ID", [], 400);
       }
 

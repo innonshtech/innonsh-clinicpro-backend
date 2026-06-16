@@ -1,7 +1,6 @@
 import { ApiResponse } from '@/utils/apiResponse';
 import bcrypt from 'bcryptjs';
-import Doctor from '@/models/Doctor';
-import dbConnect from '@/utils/db';
+import { supabase } from '@/lib/supabase';
 import { doctorRegistrationSchema } from '@/validations/userValidation';
 import { withErrorHandler } from '@/utils/apiHandler';
 
@@ -20,8 +19,6 @@ import { withErrorHandler } from '@/utils/apiHandler';
  *         description: Internal Server Error
  */
 export const POST = withErrorHandler(async (req) => {
-  await dbConnect();
-
   const body = await req.json();
 
   const parsed = doctorRegistrationSchema.safeParse(body);
@@ -34,68 +31,49 @@ export const POST = withErrorHandler(async (req) => {
     );
   }
 
-  const {
-    firstName,
-    lastName,
-    dateOfBirth,
-    profileImage,
-    gender,
-    email,
-    password,
-    consultantFee,
-    phone,
-    specialty,
-    supSpeciality,
-    sessionTime,
-    degreeCertificate,
-    identityProof,
-    status,
-    experience,
-    qualifications,
-    licenseNumber,
-    hospital,
-    hospitalAddress,
-    hospitalNumber,
-    available
-  } = parsed.data;
+  const data = parsed.data;
 
   // Check for existing doctor
-  const existingDoctor = await Doctor.findOne({
-    $or: [{ email }, { licenseNumber }]
-  });
+  const { data: existingDoctor, error: fetchError } = await supabase
+    .from('doctors')
+    .select('id')
+    .or(`email.eq.${data.email},license_number.eq.${data.licenseNumber}`)
+    .maybeSingle();
+
+  if (fetchError) throw fetchError;
 
   if (existingDoctor) {
     return ApiResponse.error('Email or license number already exists', 'DUPLICATE_ENTRY', [], 400);
   }
 
   // Hash password
-  const hashedPassword = await bcrypt.hash(password, 12);
+  const hashedPassword = await bcrypt.hash(data.password, 12);
+
+  // Convert camelCase to snake_case for Supabase
+  const mappedData = Object.fromEntries(
+    Object.entries(data).map(([k, v]) => [
+      k.replace(/([A-Z])/g, '_$1').toLowerCase(),
+      v
+    ])
+  );
+
+  mappedData.password = hashedPassword;
 
   // Create doctor
-  const newDoctor = await Doctor.create({
-    firstName,
-    lastName,
-    dateOfBirth,
-    profileImage,
-    gender,
-    email,
-    password: hashedPassword,
-    consultantFee,
-    sessionTime,
-    phone,
-    specialty,
-    supSpeciality,
-    experience,
-    qualifications,
-    licenseNumber,
-    hospital,
-    hospitalAddress,
-    hospitalNumber,
-    available,
-    degreeCertificate,
-    identityProof,
-    status,
-  });
+  const { data: newDoctor, error: insertError } = await supabase
+    .from('doctors')
+    .insert([mappedData])
+    .select()
+    .single();
+
+  if (insertError) {
+    console.error('Supabase insert error:', insertError);
+    throw insertError;
+  }
+
+  // Preserve legacy ID for frontend compatibility
+  newDoctor._id = newDoctor.id;
+  delete newDoctor.password;
 
   return ApiResponse.success({ doctor: newDoctor }, 'Doctor created successfully', 201);
 });

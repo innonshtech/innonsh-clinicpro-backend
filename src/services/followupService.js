@@ -1,61 +1,77 @@
-import Appointment from '@/models/Appointments';
-import dbConnect from '@/utils/db';
 import AppError from '@/utils/AppError';
+import { supabase } from '@/lib/supabase';
 
 /**
  * Service to fetch follow-up appointments for reception.
  */
 export const getFollowupList = async (filters, user) => {
-  await dbConnect();
-  
   const { page = 1, limit = 10, date, doctorId } = filters;
   
   if (!user.clinicId) {
     throw new AppError('Clinic ID missing from user context', 401, 'UNAUTHORIZED');
   }
 
-  // 1. Build Query
-  const query = {
-    clinicId: user.clinicId,
-    type: 'follow_up',
-    status: { $in: ['scheduled', 'booked'] } // Show upcoming/unconfirmed follow-ups
-  };
+  let supabaseQuery = supabase
+    .from('appointments')
+    .select(`
+      *,
+      patients (id, first_name, last_name, patient_code, phone),
+      doctors (id, first_name, last_name, specialty)
+    `, { count: 'exact' })
+    .eq('clinic_id', user.clinicId)
+    .eq('type', 'follow_up')
+    .in('status', ['scheduled', 'booked']);
 
   if (date) {
     const searchDate = new Date(date);
     searchDate.setUTCHours(0, 0, 0, 0);
-    const endDate = new Date(date);
-    endDate.setUTCHours(23, 59, 59, 999);
-    query.appointmentDate = { $gte: searchDate, $lte: endDate };
+    const dateStr = searchDate.toISOString().split('T')[0];
+    supabaseQuery = supabaseQuery.eq('appointment_date', dateStr);
   } else {
-    // Default: Show future follow-ups starting from today UTC
     const today = new Date();
     today.setUTCHours(0, 0, 0, 0);
-    query.appointmentDate = { $gte: today };
+    const dateStr = today.toISOString().split('T')[0];
+    supabaseQuery = supabaseQuery.gte('appointment_date', dateStr);
   }
 
   if (doctorId) {
-    query.doctorId = doctorId;
+    supabaseQuery = supabaseQuery.eq('doctor_id', doctorId);
   }
 
-  // 2. Execute with Pagination
   const skip = (page - 1) * limit;
   
-  const [appointments, total] = await Promise.all([
-    Appointment.find(query)
-      .populate('patientId', 'firstName lastName patientId phoneNumber')
-      .populate('doctorId', 'firstName lastName specialty')
-      .sort({ appointmentDate: 1 })
-      .skip(skip)
-      .limit(limit),
-    Appointment.countDocuments(query)
-  ]);
+  const { data: appointmentsData, count, error } = await supabaseQuery
+    .order('appointment_date', { ascending: true })
+    .range(skip, skip + limit - 1);
+
+  if (error) {
+    console.error('Supabase follow-up fetch error:', error);
+    throw new AppError('Error fetching follow-ups from Supabase', 500, 'DB_ERROR');
+  }
+
+  const appointments = (appointmentsData || []).map(a => ({
+    ...a,
+    _id: a.id,
+    patientId: a.patients ? {
+      _id: a.patients.id,
+      firstName: a.patients.first_name,
+      lastName: a.patients.last_name,
+      patientId: a.patients.patient_code,
+      phoneNumber: a.patients.phone
+    } : null,
+    doctorId: a.doctors ? {
+      _id: a.doctors.id,
+      firstName: a.doctors.first_name,
+      lastName: a.doctors.last_name,
+      specialty: a.doctors.specialty
+    } : null
+  }));
 
   return {
     appointments,
-    total,
-    page,
-    limit,
-    totalPages: Math.ceil(total / limit)
+    total: count || 0,
+    page: Number(page),
+    limit: Number(limit),
+    totalPages: Math.ceil((count || 0) / limit)
   };
 };

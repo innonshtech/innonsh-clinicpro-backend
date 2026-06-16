@@ -1,7 +1,6 @@
 import { NextResponse } from 'next/server';
 import { ApiResponse } from '@/utils/apiResponse';
-import dbConnect from '@/utils/db';
-import Session from '@/models/Session';
+import { supabase } from '@/lib/supabase';
 import { withErrorHandler } from '@/utils/apiHandler';
 
 /**
@@ -15,10 +14,10 @@ import { withErrorHandler } from '@/utils/apiHandler';
  *         description: Successful response
  *       401:
  *         description: Unauthorized
+ *       500:
+ *         description: Internal Server Error
  */
 export const GET = withErrorHandler(async (req) => {
-  await dbConnect();
-  
   // The withErrorHandler already extracts user info from middleware headers
   const userId = req.headers.get('x-user-id');
   const userRole = req.headers.get('x-user-role');
@@ -27,25 +26,38 @@ export const GET = withErrorHandler(async (req) => {
     return ApiResponse.error("Unauthorized", "UNAUTHORIZED", [], 401);
   }
   
-  // If user is admin, they might want to see all sessions? 
-  // Let's stick to the current user's sessions to avoid data leaks unless explicitly requested.
-  // The requirement: "Session information accessible for security reviews."
-  // If the requester is an admin, let them pass an optional ?userId= query param
   const url = new URL(req.url);
   const targetUserId = url.searchParams.get('userId');
   
-  let query = { isActive: true };
+  let queryUserId = userId;
   
   if (userRole === 'admin' && targetUserId) {
-    query.userId = targetUserId;
-  } else {
-    query.userId = userId;
+    queryUserId = targetUserId;
   }
 
-  const activeSessions = await Session.find(query).sort({ lastActivityAt: -1 }).select('-refreshToken -usedRefreshTokens');
+  const { data: activeSessions, error } = await supabase
+    .from('sessions')
+    .select('id, user_id, device_info, ip_address, is_active, created_at, expires_at, last_activity_at')
+    .eq('is_active', true)
+    .eq('user_id', queryUserId)
+    .order('last_activity_at', { ascending: false });
+    
+  if (error) throw error;
+  
+  // Map back for frontend
+  const mappedSessions = (activeSessions || []).map(s => ({
+    _id: s.id,
+    userId: s.user_id,
+    deviceInfo: s.device_info,
+    ipAddress: s.ip_address,
+    isActive: s.is_active,
+    createdAt: s.created_at,
+    expiresAt: s.expires_at,
+    lastActivityAt: s.last_activity_at
+  }));
   
   return ApiResponse.success({
-    count: activeSessions.length,
-    sessions: activeSessions
+    count: mappedSessions.length,
+    sessions: mappedSessions
   }, "Active sessions retrieved successfully");
 });

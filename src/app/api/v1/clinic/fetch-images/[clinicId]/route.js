@@ -1,8 +1,7 @@
 // /app/api/clinic/images/[clinicId]/route.js
 
 import { ApiResponse } from '@/utils/apiResponse';
-import dbConnect from '@/utils/db';
-import Clinic from '@/models/Clinic';
+import { supabase } from '@/lib/supabase';
 
 // GET: /api/v1/clinic/fetch-images/[clinicId]
 /**
@@ -27,16 +26,19 @@ import Clinic from '@/models/Clinic';
  */
 export async function GET(req, { params }) {
   try {
-    await dbConnect();
-    const { clinicId } = params;
+    const { clinicId } = await params;
 
-    const clinic = await Clinic.findById(clinicId).select('images');
+    const { data: clinic, error } = await supabase
+      .from('clinics')
+      .select('image_urls')
+      .eq('id', clinicId)
+      .single();
 
-    if (!clinic) {
+    if (error || !clinic) {
       return ApiResponse.error('Clinic not found', 'NOT_FOUND', [], 404);
     }
 
-    return ApiResponse.success({ images: clinic.images }, 'Images fetched successfully');
+    return ApiResponse.success({ images: clinic.image_urls || [] }, 'Images fetched successfully');
   } catch (error) {
     console.error('Error fetching clinic images:', error);
     return ApiResponse.error('Server error', 'SERVER_ERROR', error.message, 500);

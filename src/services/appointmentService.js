@@ -197,8 +197,27 @@ export const getAppointmentList = async (queryParams, user) => {
   const appointments = (data || []).map(a => ({
     ...a,
     _id: a.id,
-    patientId: a.patients ? { _id: a.patients.id, ...a.patients } : a.patient_id,
-    doctorId: a.doctors ? { _id: a.doctors.id, ...a.doctors } : a.doctor_id,
+    appointmentDate: a.appointment_date,
+    timeSlot: a.time_slot,
+    queueNumber: a.queue_number,
+    checkInTime: a.check_in_time,
+    isEmergency: a.is_emergency,
+    createdAt: a.created_at,
+    updatedAt: a.updated_at,
+    patientId: a.patients ? { 
+      _id: a.patients.id, 
+      firstName: a.patients.first_name,
+      lastName: a.patients.last_name,
+      phoneNumber: a.patients.phone_number,
+      ...a.patients 
+    } : a.patient_id,
+    doctorId: a.doctors ? { 
+      _id: a.doctors.id, 
+      firstName: a.doctors.first_name,
+      lastName: a.doctors.last_name,
+      specialization: a.doctors.specialty,
+      ...a.doctors 
+    } : a.doctor_id,
   }));
 
   return {
@@ -393,7 +412,7 @@ export const getPatientAppointmentHistory = async (patientId, user) => {
     .select(`
       *,
       doctors (first_name, last_name, specialty),
-      visits (id, diagnosis, medicines)
+      visits!fk_visit_appointment(id, diagnosis, medicines)
     `)
     .eq('patient_id', targetId)
     .eq('clinic_id', clinicId)
@@ -456,15 +475,38 @@ export const getConsultationDetails = async (appointmentId, user) => {
     .limit(1)
     .maybeSingle();
 
-  const patientObj = { ...appointment.patients, _id: appointment.patients?.id };
+  const patientObj = { 
+    ...appointment.patients, 
+    _id: appointment.patients?.id,
+    firstName: appointment.patients?.first_name,
+    lastName: appointment.patients?.last_name,
+    phoneNumber: appointment.patients?.phone_number,
+    dateOfBirth: appointment.patients?.date_of_birth,
+    bloodGroup: appointment.patients?.blood_group,
+    patientCode: appointment.patients?.patient_code,
+    gender: appointment.patients?.gender,
+    medicalHistory: appointment.patients?.medical_history,
+    currentMedications: appointment.patients?.current_medications
+  };
   if (lastVisit) {
     patientObj.lastVisitSummary = lastVisit.diagnosis || lastVisit.notes || `Visited on ${new Date(lastVisit.created_at).toLocaleDateString()}`;
+  }
+
+  let visitObj = null;
+  if (currentVisit) {
+    visitObj = {
+      ...currentVisit,
+      _id: currentVisit.id,
+      clinicalNotes: currentVisit.notes,
+      followUpDate: currentVisit.follow_up_date,
+      followUpNotes: currentVisit.follow_up_notes
+    };
   }
 
   return {
     appointment: { ...appointment, _id: appointment.id },
     patient: patientObj,
-    visit: currentVisit,
+    visit: visitObj,
     history: history || [],
   };
 };

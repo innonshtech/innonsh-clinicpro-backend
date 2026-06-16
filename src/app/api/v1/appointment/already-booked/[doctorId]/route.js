@@ -1,6 +1,5 @@
 import { ApiResponse } from '@/utils/apiResponse';
-import dbConnect from '@/utils/db';
-import Appointment from '@/models/Appointments';
+import { supabase } from '@/lib/supabase';
 
 // GET: /api/v1/appointment/already-booked/[doctorId]
 /**
@@ -25,20 +24,26 @@ import Appointment from '@/models/Appointments';
  */
 export async function GET(req, { params }) {
   try {
-    await dbConnect();
-    const { doctorId } = params;
+    const { doctorId } = await params;
 
     if (!doctorId) {
       return ApiResponse.error("Doctor ID is required", "MISSING_FIELD", [], 400);
     }
 
-    const appointments = await Appointment.find({ doctorId });
+    const { data: appointments, error } = await supabase
+      .from('appointments')
+      .select('appointment_date, time_slot')
+      .eq('doctor_id', doctorId)
+      .not('status', 'eq', 'cancelled');
+
+    if (error) throw error;
 
     // Group booked slots by date
     const bookedSlots = {};
-    appointments.forEach((appointment) => {
-      const date = appointment.appointmentDate;
-      const time = appointment.time;
+    (appointments || []).forEach((appointment) => {
+      // Use original timeSlot mapping
+      const date = appointment.appointment_date;
+      const time = appointment.time_slot;
 
       if (!bookedSlots[date]) {
         bookedSlots[date] = [];

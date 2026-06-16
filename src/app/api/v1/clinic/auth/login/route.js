@@ -1,8 +1,5 @@
-import dbConnect from "@/utils/db";
-import Clinic from "@/models/Clinic";
-import Staff from "@/models/Staff";
+import { supabase } from "@/lib/supabase";
 import bcrypt from "bcryptjs";
-import jwt from "jsonwebtoken";
 import { ApiResponse } from "@/utils/apiResponse";
 import { generateToken } from "@/utils/generateToken";
 
@@ -19,30 +16,44 @@ import { generateToken } from "@/utils/generateToken";
  */
 export async function POST(req) {
   try {
-    await dbConnect();
     const { email, password } = await req.json();
 
     if (!email || !password) {
       return ApiResponse.error("Email and password are required", "VALIDATION_ERROR", [], 400);
     }
 
-    // 1. Try to find in Clinic collection
-    let user = await Clinic.findOne({ email });
+    // 1. Try to find in clinics
+    const { data: clinic, error: cErr } = await supabase
+      .from('clinics')
+      .select('*')
+      .eq('email', email)
+      .maybeSingle();
+      
+    let user = clinic;
     let role = 'clinic';
     let clinicId = null;
     let name = '';
 
     if (!user) {
-      // 2. Try to find in Staff collection (receptionists)
-      user = await Staff.findOne({ email });
-      if (user) {
-        role = 'receptionist';
-        clinicId = user.clinicId;
-        name = `${user.firstName} ${user.lastName}`;
+      // 2. Try to find in staff (receptionists)
+      const { data: staff, error: sErr } = await supabase
+        .from('staff')
+        .select('*')
+        .eq('email', email)
+        .maybeSingle();
+
+      if (staff) {
+        user = staff;
+        role = staff.role || 'receptionist';
+        clinicId = staff.clinic_id;
+        name = `${staff.first_name} ${staff.last_name}`;
+        user._id = staff.id;
       }
     } else {
-      clinicId = user._id; // For clinic admin, they are their own clinicId
-      name = user.clinicName;
+      clinicId = user.id; // For clinic admin, they are their own clinicId
+      name = user.name;
+      role = user.role || 'clinic';
+      user._id = user.id;
     }
 
     if (!user) {
@@ -64,7 +75,7 @@ export async function POST(req) {
       return ApiResponse.error("Invalid password", "INVALID_PASSWORD", [], 401);
     }
 
-    const tokens = generateToken(user, user.role || role, clinicId);
+    const tokens = generateToken(user, role, clinicId);
 
     const { createSession } = await import('@/utils/sessionHelper');
     await createSession(req, user, tokens);
@@ -76,7 +87,7 @@ export async function POST(req) {
         name: name,
         email: user.email,
         logo: user.logo || null,
-        role: user.role || role,
+        role: role,
         clinicId: clinicId
       },
     }, "Login successful");

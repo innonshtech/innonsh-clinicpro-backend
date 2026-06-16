@@ -1,10 +1,7 @@
-import dbConnect from "@/utils/db";
-import Doctor from "@/models/Doctor";
+import { supabase } from "@/lib/supabase";
 import bcrypt from "bcryptjs";
-import jwt from "jsonwebtoken";
 import { ApiResponse } from "@/utils/apiResponse";
 import { generateToken } from "@/utils/generateToken";
-
 
 /**
  * @swagger
@@ -22,10 +19,16 @@ import { generateToken } from "@/utils/generateToken";
  */
 export async function POST(req) {
   try {
-    await dbConnect();
     const { email, password } = await req.json();
 
-    const user = await Doctor.findOne({ email });
+    const { data: user, error } = await supabase
+      .from('doctors')
+      .select('*')
+      .eq('email', email)
+      .maybeSingle();
+
+    if (error) throw error;
+
     if (!user) {
       return ApiResponse.error("User not found", "USER_NOT_FOUND", [], 404);
     }
@@ -35,7 +38,9 @@ export async function POST(req) {
       return ApiResponse.error("Invalid password", "INVALID_PASSWORD", [], 401);
     }
 
-    const tokens = generateToken(user, user.role);
+    user._id = user.id; // Map id for generateToken
+
+    const tokens = generateToken(user, user.role || 'doctor');
 
     const { createSession } = await import('@/utils/sessionHelper');
     await createSession(req, user, tokens);
@@ -43,10 +48,10 @@ export async function POST(req) {
     const response = ApiResponse.success({
       token: tokens.accessToken,
       user: {
-        id: user._id,
-        name: `${user.firstName} ${user.lastName}`,
+        id: user.id,
+        name: `${user.first_name} ${user.last_name}`,
         email: user.email,
-        role: user.role,
+        role: user.role || 'doctor',
       },
     }, "Login successful");
 

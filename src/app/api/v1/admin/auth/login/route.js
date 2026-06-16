@@ -1,11 +1,8 @@
-import dbConnect from "@/utils/db";
-import Admin from "@/models/Admin";
+import { supabase } from "@/lib/supabase";
 import bcrypt from "bcryptjs";
-import jwt from "jsonwebtoken";
 import { NextResponse } from "next/server";
 import { ApiResponse } from "@/utils/apiResponse";
 import { generateToken } from "@/utils/generateToken";
-
 
 export async function OPTIONS() {
   return NextResponse.json({}, { status: 200 });
@@ -26,46 +23,55 @@ export async function OPTIONS() {
  *         description: Internal Server Error
  */
 export async function POST(req) {
-  await dbConnect();
+  try {
+    const { email, password } = await req.json();
 
-  const { email, password } = await req.json();
+    const { data: user, error } = await supabase
+      .from('admins')
+      .select('*')
+      .eq('email', email)
+      .maybeSingle();
 
-  const user = await Admin.findOne({ email });
-  if (!user) {
-    const res = ApiResponse.success({ error: "User not found" }, { status: 404 });
-    return
-  }
+    if (error) throw error;
 
-  const isPasswordValid = await bcrypt.compare(password, user.password);
-  if (!isPasswordValid) {
-    const res = ApiResponse.success({ error: "Invalid password" }, { status: 401 });
-    return
-  }
+    if (!user) {
+      return ApiResponse.success({ error: "User not found" }, { status: 404 });
+    }
 
-  const tokens = generateToken(user, user.role);
+    const isPasswordValid = await bcrypt.compare(password, user.password);
+    if (!isPasswordValid) {
+      return ApiResponse.success({ error: "Invalid password" }, { status: 401 });
+    }
+
+    user._id = user.id;
+
+    const tokens = generateToken(user, user.role);
 
     const { createSession } = await import('@/utils/sessionHelper');
     await createSession(req, user, tokens);
 
-  const response = ApiResponse.success({
-    message: "Login successful",
-    token: tokens.accessToken,
-    user: {
-      id: user._id,
-      name: user.name,
-      email: user.email,
-      role: user.role,
-    },
-  });
+    const response = ApiResponse.success({
+      message: "Login successful",
+      token: tokens.accessToken,
+      user: {
+        id: user.id,
+        name: user.name,
+        email: user.email,
+        role: user.role,
+      },
+    });
 
-  response.cookies.set('refreshToken', tokens.refreshToken, {
-    httpOnly: true,
-    secure: process.env.NODE_ENV === 'production',
-    sameSite: 'strict',
-    path: '/',
-    maxAge: 7 * 24 * 60 * 60, // 7 days
-  });
+    response.cookies.set('refreshToken', tokens.refreshToken, {
+      httpOnly: true,
+      secure: process.env.NODE_ENV === 'production',
+      sameSite: 'strict',
+      path: '/',
+      maxAge: 7 * 24 * 60 * 60, // 7 days
+    });
 
-  return response;
+    return response;
+  } catch (error) {
+    console.error("Admin login error:", error);
+    return ApiResponse.error("Internal Server Error", "SERVER_ERROR", error.message, 500);
+  }
 }
-

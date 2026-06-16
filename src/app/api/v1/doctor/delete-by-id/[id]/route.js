@@ -1,7 +1,6 @@
 import { NextResponse } from 'next/server';
 import { ApiResponse } from '@/utils/apiResponse';
-import Doctor from '@/models/Doctor';
-import dbConnect from '@/utils/db';
+import { supabase } from '@/lib/supabase';
 
 // Handle DELETE doctor by ID
 /**
@@ -26,11 +25,17 @@ import dbConnect from '@/utils/db';
  */
 export async function DELETE(req, { params }) {
   try {
-    await dbConnect();
     const resolvedParams = await params;
     const { id } = resolvedParams;
 
-    const deletedDoctor = await Doctor.findByIdAndDelete(id);
+    const { data: deletedDoctor, error } = await supabase
+      .from('doctors')
+      .delete()
+      .eq('id', id)
+      .select()
+      .maybeSingle();
+
+    if (error) throw error;
 
     if (!deletedDoctor) {
       return ApiResponse.error('Doctor not found', 'USER_NOT_FOUND', [], 404);

@@ -1,13 +1,13 @@
 import { ApiResponse } from '@/utils/apiResponse';
 import * as prescriptionService from '@/services/prescriptionService';
 import { prescriptionCreateSchema } from '@/validations/userValidation';
-import dbConnect from '@/utils/db';
+
 
 /**
  * Controller to handle adding a prescription to a visit.
  */
 export const createPrescription = async (req) => {
-  await dbConnect();
+  
   
   const body = await req.json();
 

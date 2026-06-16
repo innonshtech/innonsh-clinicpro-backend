@@ -1,8 +1,6 @@
 import { NextResponse } from 'next/server';
 import { ApiResponse } from '@/utils/apiResponse';
-import Doctor from '@/models/Doctor';
-import Leave from '@/models/Leave';
-import dbConnect from '@/utils/db';
+import { supabase } from '@/lib/supabase';
 
 // GET all doctors
 /**
@@ -21,25 +19,40 @@ import dbConnect from '@/utils/db';
  */
 export async function GET() {
   try {
-    await dbConnect();
-
-    const doctors = await Doctor.find(); // Fetch all doctors
+    const { data: doctors, error: docsError } = await supabase.from('doctors').select('*');
+    if (docsError) throw docsError;
 
     // Check leaves for today
     const today = new Date();
     today.setHours(0, 0, 0, 0);
+    const dateStr = today.toISOString().split('T')[0];
 
-    const enrichedDoctors = await Promise.all(
-      doctors.map(async (doc) => {
-        const docObj = doc.toObject();
-        const leaveRecord = await Leave.findOne({
-          doctorId: doc._id,
-          date: today
-        });
-        docObj.isOnLeave = !!leaveRecord;
-        return docObj;
-      })
-    );
+    const { data: leaves } = await supabase
+      .from('leaves')
+      .select('doctor_id')
+      .eq('date', dateStr);
+
+    const doctorsOnLeave = new Set((leaves || []).map(l => l.doctor_id));
+
+    const enrichedDoctors = (doctors || []).map(doc => ({
+      ...doc,
+      _id: doc.id, // Preserve legacy _id for frontend compatibility
+      isOnLeave: doctorsOnLeave.has(doc.id),
+      firstName: doc.first_name,
+      lastName: doc.last_name,
+      profileImage: doc.profile_image,
+      dateOfBirth: doc.date_of_birth,
+      consultantFee: doc.consultant_fee,
+      licenseNumber: doc.license_number,
+      hospitalAddress: doc.hospital_address,
+      hospitalNumber: doc.hospital_number,
+      clinicId: doc.clinic_id,
+      sessionTime: doc.session_time,
+      degreeCertificate: doc.degree_certificate,
+      identityProof: doc.identity_proof,
+      supSpeciality: doc.sup_speciality,
+      isVerified: doc.is_verified || false
+    }));
 
     return ApiResponse.success({ doctors: enrichedDoctors });
   } catch (error) {

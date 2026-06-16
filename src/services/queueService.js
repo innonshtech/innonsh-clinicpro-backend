@@ -1,49 +1,46 @@
-import Appointment from '@/models/Appointments';
-import dbConnect from '@/utils/db';
-import mongoose from 'mongoose';
+import { supabase } from '@/lib/supabase';
 import AppError from '@/utils/AppError';
-
 
 /**
  * Service to fetch the live queue for a specific doctor.
  * Filters by today's date and statuses 'checked_in' or 'in_progress'.
  */
 export const getDoctorQueue = async (doctorId, user) => {
-  await dbConnect();
-  
-  // 1. Resolve Doctor ID format
-  const targetDoctorId = mongoose.Types.ObjectId.isValid(doctorId) 
-    ? new mongoose.Types.ObjectId(doctorId)
-    : null;
+  if (!doctorId) throw new AppError('Doctor ID is required', 400, 'INVALID_ID');
 
-  if (!targetDoctorId) throw new AppError('Invalid Doctor ID format', 400, 'INVALID_ID');
+  // Define "Today" time bounds
+  const today = new Date();
+  today.setUTCHours(0, 0, 0, 0);
+  const dateStr = today.toISOString().split('T')[0];
 
+  // Fetch all active queue appointments
+  const { data: appointments, error } = await supabase
+    .from('appointments')
+    .select(`
+      *,
+      patients (id, first_name, last_name, patient_code, phone_number, gender, date_of_birth)
+    `)
+    .eq('doctor_id', doctorId)
+    .eq('clinic_id', user.clinicId)
+    .eq('appointment_date', dateStr)
+    .in('status', ['checked_in', 'in_progress'])
+    .order('is_emergency', { ascending: false })
+    .order('check_in_time', { ascending: true, nullsFirst: false });
 
-  // 2. Define "Today" time bounds (UTC)
-  const todayStart = new Date();
-  todayStart.setUTCHours(0, 0, 0, 0);
-  const todayEnd = new Date();
-  todayEnd.setUTCHours(23, 59, 59, 999);
+  if (error) {
+    console.error('Supabase queue fetch error:', error);
+    throw new AppError('Error fetching doctor queue', 500, 'DB_ERROR');
+  }
 
-  // 3. Fetch all active queue appointments
-  const appointments = await Appointment.find({
-    doctorId: targetDoctorId,
-    clinicId: user.clinicId,
-    appointmentDate: { $gte: todayStart, $lte: todayEnd },
-    status: { $in: ['checked_in', 'in_progress'] }
-  })
-    .populate('patientId', 'firstName lastName patientId patientCode phoneNumber gender dateOfBirth')
-    .sort({ isEmergency: -1, checkInTime: 1 });
-
-  // 4. Map Dynamic Tokens
-  const mappedQueue = appointments.map((app, index) => ({
-    appointmentId: app._id,
-    patientName: app.patientId ? `${app.patientId.firstName} ${app.patientId.lastName}` : 'Unknown Patient',
-    patientId: app.patientId?.patientCode || app.patientId?.patientId || 'N/A',
-    tokenNumber: index + 1,
-    timeSlot: app.timeSlot,
+  // Map Dynamic Tokens
+  const mappedQueue = (appointments || []).map((app, index) => ({
+    appointmentId: app.id,
+    patientName: app.patients ? `${app.patients.first_name} ${app.patients.last_name}` : 'Unknown Patient',
+    patientId: app.patients?.patient_code || 'N/A',
+    queueNumber: app.queue_number || index + 1,
+    timeSlot: app.time_slot,
     status: app.status,
-    isEmergency: app.isEmergency
+    isEmergency: app.is_emergency
   }));
 
   const current = mappedQueue.find(app => app.status === 'in_progress') || null;

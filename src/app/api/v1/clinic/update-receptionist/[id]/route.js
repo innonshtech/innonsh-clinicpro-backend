@@ -1,7 +1,6 @@
 import { ApiResponse } from '@/utils/apiResponse';
-import dbConnect from '@/utils/db';
-import Staff from '@/models/Staff';
-import Clinic from '@/models/Clinic';
+import { supabase } from '@/lib/supabase';
+import bcrypt from 'bcryptjs';
 
 // PUT: /api/v1/clinic/update-receptionist/[id]
 /**
@@ -26,7 +25,6 @@ import Clinic from '@/models/Clinic';
  */
 export async function PUT(req, { params }) {
   try {
-    await dbConnect();
     const { id } = await params;
     const data = await req.json();
 
@@ -34,11 +32,34 @@ export async function PUT(req, { params }) {
       return ApiResponse.error('Receptionist ID is required', 'MISSING_FIELD', [], 400);
     }
 
-    const updatedStaff = await Staff.findByIdAndUpdate(id, data, { new: true });
+    const mappedData = Object.fromEntries(
+      Object.entries(data).map(([k, v]) => [
+        k.replace(/([A-Z])/g, '_$1').toLowerCase(),
+        v
+      ])
+    );
+
+    if (mappedData.password) {
+      mappedData.password = await bcrypt.hash(mappedData.password, 12);
+    }
+
+    const { data: updatedStaff, error } = await supabase
+      .from('staff')
+      .update(mappedData)
+      .eq('id', id)
+      .select()
+      .maybeSingle();
+
+    if (error) throw error;
     
     if (!updatedStaff) {
       return ApiResponse.error('Receptionist not found', 'NOT_FOUND', [], 404);
     }
+
+    updatedStaff._id = updatedStaff.id;
+    updatedStaff.firstName = updatedStaff.first_name;
+    updatedStaff.lastName = updatedStaff.last_name;
+    delete updatedStaff.password;
 
     return ApiResponse.success({ staff: updatedStaff }, 'Receptionist updated successfully');
   } catch (error) {
@@ -50,23 +71,34 @@ export async function PUT(req, { params }) {
 // GET: /api/v1/clinic/update-receptionist/[id]
 export async function GET(req, { params }) {
   try {
-    await dbConnect();
     const { id } = await params;
 
     if (!id) {
       return ApiResponse.error('Receptionist ID is required', 'MISSING_FIELD', [], 400);
     }
 
-    const staff = await Staff.findById(id);
+    const { data: staff, error } = await supabase
+      .from('staff')
+      .select('*, clinics (clinic_name)')
+      .eq('id', id)
+      .maybeSingle();
+
+    if (error) throw error;
+
     if (!staff) {
       return ApiResponse.error('Receptionist not found', 'NOT_FOUND', [], 404);
     }
-    const staffObj = staff.toObject();
-    if (staffObj.clinicId) {
-      const clinicObj = await Clinic.findById(staffObj.clinicId);
-      if (clinicObj) {
-        staffObj.clinicName = clinicObj.clinicName;
-      }
+
+    const staffObj = { 
+      ...staff, 
+      _id: staff.id,
+      firstName: staff.first_name,
+      lastName: staff.last_name
+    };
+    delete staffObj.password;
+    
+    if (staffObj.clinics) {
+      staffObj.clinicName = staffObj.clinics.clinic_name;
     }
 
     return ApiResponse.success({ staff: staffObj }, 'Receptionist fetched successfully');

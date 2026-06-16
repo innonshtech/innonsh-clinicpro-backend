@@ -1,6 +1,5 @@
 import { ApiResponse } from '@/utils/apiResponse';
-import dbConnect from '@/utils/db';
-import Clinic from '@/models/Clinic';
+import { supabase } from '@/lib/supabase';
 
 // GET clinic profile data by ID
 /**
@@ -25,17 +24,45 @@ import Clinic from '@/models/Clinic';
  */
 export async function GET(req, { params }) {
   try {
-    await dbConnect();
     const { id } = await params;
 
     if (!id) {
       return ApiResponse.error('Clinic ID is required', 'MISSING_FIELD', [], 400);
     }
 
-    const clinic = await Clinic.findById(id).select('-password');
-    if (!clinic) {
+    const { data: clinicData, error } = await supabase
+      .from('clinics')
+      .select('*')
+      .eq('id', id)
+      .single();
+
+    if (error || !clinicData) {
+      console.error('Fetch Clinic Error from Supabase:', error);
       return ApiResponse.error('Clinic not found', 'NOT_FOUND', [], 404);
     }
+
+    const clinic = {
+      ...clinicData,
+      _id: clinicData.id,
+      clinicName: clinicData.clinic_name || '',
+      clinicType: clinicData.clinic_type || 'general',
+      registrationNumber: clinicData.registration_number || '',
+      taxId: clinicData.tax_id || '',
+      postalCode: clinicData.postal_code || '',
+      description: clinicData.description || '',
+      address: clinicData.address || '',
+      city: clinicData.city || '',
+      state: clinicData.state || '',
+      country: clinicData.country || '',
+      phone: clinicData.phone || '',
+      email: clinicData.email || '',
+      website: clinicData.website || '',
+      logo: clinicData.logo || '',
+      specialties: clinicData.specialties || [],
+      openingHours: clinicData.opening_hours || undefined,
+      createdAt: clinicData.created_at,
+      updatedAt: clinicData.updated_at
+    };
 
     return ApiResponse.success({ clinic }, 'Clinic profile fetched successfully');
   } catch (error) {
