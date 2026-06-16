@@ -1,9 +1,10 @@
 import { ApiResponse } from '@/utils/apiResponse';
-import Leave from '@/models/Leave';
-import dbConnect from '@/utils/db';
+import { supabase } from '@/lib/supabase';
 
 export async function GET() {
-  await dbConnect();
-  const leaves = await Leave.find({});
+  const { data: leaves, error } = await supabase.from('leaves').select('*');
+  if (error) {
+    return ApiResponse.error(error.message, 'DB_ERROR', [], 500);
+  }
   return ApiResponse.success({ leaves });
 }

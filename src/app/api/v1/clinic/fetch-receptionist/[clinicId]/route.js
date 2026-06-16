@@ -1,8 +1,7 @@
 // /app/api/staff/by-clinic/[clinicId]/route.js
 
 import { ApiResponse } from '@/utils/apiResponse';
-import dbConnect from '@/utils/db';
-import Staff from '@/models/Staff';
+import { supabase } from '@/lib/supabase';
 
 // GET: /api/v1/clinic/fetch-receptionist/[clinicId]
 /**
@@ -27,16 +26,28 @@ import Staff from '@/models/Staff';
  */
 export async function GET(req, { params }) {
   try {
-    await dbConnect();
     const { clinicId } = await params;
 
-    const staffList = await Staff.find({ clinicId });
+    const { data: staffList, error } = await supabase
+      .from('staff')
+      .select('*')
+      .eq('clinic_id', clinicId);
+
+    if (error) throw error;
 
     if (!staffList || staffList.length === 0) {
       return ApiResponse.success({ staff: [] }, 'No staff found for this clinic.');
     }
 
-    return ApiResponse.success({ staff: staffList }, 'Staff fetched successfully');
+    const staff = staffList.map(s => ({
+      ...s,
+      _id: s.id,
+      firstName: s.first_name,
+      lastName: s.last_name,
+      clinicId: s.clinic_id
+    }));
+
+    return ApiResponse.success({ staff }, 'Staff fetched successfully');
   } catch (error) {
     console.error('Error fetching staff by clinicId:', error);
     return ApiResponse.error('Server error. Please try again later.', 'SERVER_ERROR', error.message, 500);

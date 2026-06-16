@@ -1,16 +1,17 @@
 import { ApiResponse } from '@/utils/apiResponse';
-import Doctor from '@/models/Doctor';
-import dbConnect from '@/utils/db';
+import { supabase } from '@/lib/supabase';
 
 export async function GET() {
-  await dbConnect();
-  const doctors = await Doctor.find({});
+  const { data: doctors, error } = await supabase.from('doctors').select('*');
+  if (error) {
+    return ApiResponse.error(error.message, 'DB_ERROR', [], 500);
+  }
   const debugInfo = doctors.map(doc => ({
-    name: `${doc.firstName} ${doc.lastName}`,
-    clinicId: doc.clinicId,
+    name: `${doc.first_name} ${doc.last_name}`,
+    clinicId: doc.clinic_id,
     available: doc.available,
-    availableDays: doc.availableDays,
-    sessionTime: doc.sessionTime
+    availableDays: doc.available_days,
+    sessionTime: doc.session_time
   }));
   return ApiResponse.success({ doctors: debugInfo });
 }

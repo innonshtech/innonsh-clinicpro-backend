@@ -1,13 +1,13 @@
 import { ApiResponse } from '@/utils/apiResponse';
 import * as visitService from '@/services/visitService';
 import { visitCreateSchema, visitUpdateSchema } from '@/validations/userValidation';
-import dbConnect from '@/utils/db';
+
 
 /**
  * Controller to handle starting a consultation (Visit Create).
  */
 export const createVisit = async (req) => {
-  await dbConnect();
+  
 
   const body = await req.json();
 
@@ -65,7 +65,7 @@ export const createVisit = async (req) => {
  * Controller to handle marking a consultation as completed.
  */
 export const completeVisit = async (req, { params }) => {
-  await dbConnect();
+  
   const { id } = await params;
 
   if (!id) {
@@ -103,7 +103,7 @@ export const completeVisit = async (req, { params }) => {
  * Controller to handle partially updating a visit record (Save Progress).
  */
 export const updateVisit = async (req, { params }) => {
-  await dbConnect();
+  
   const { id } = await params;
   const body = await req.json();
 
@@ -145,7 +145,7 @@ export const updateVisit = async (req, { params }) => {
  * Controller to handle fetching visit history for a patient.
  */
 export const getPatientVisitHistory = async (req, { params }) => {
-  await dbConnect();
+  
   const { id } = await params;
 
   if (!id) {
@@ -176,7 +176,7 @@ export const getPatientVisitHistory = async (req, { params }) => {
  * Maps snake_case payload from Ticket 2 to internal camelCase logic.
  */
 export const saveVisitNotes = async (req) => {
-  await dbConnect();
+  
   
   try {
     const body = await req.json();

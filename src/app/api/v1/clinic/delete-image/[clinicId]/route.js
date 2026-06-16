@@ -1,6 +1,5 @@
 import { ApiResponse } from '@/utils/apiResponse';
-import dbConnect from '@/utils/db';
-import Clinic from '@/models/Clinic';
+import { supabase } from '@/lib/supabase';
 
 /**
  * PATCH: Remove an image URL from a clinic's image list
@@ -27,25 +26,36 @@ import Clinic from '@/models/Clinic';
  */
 export async function PATCH(req, { params }) {
   try {
-    await dbConnect();
-    const { clinicId } = params;
+    const { clinicId } = await params;
     const { imageUrl } = await req.json();
 
     if (!imageUrl) {
       return ApiResponse.error('Image URL is required', 'MISSING_FIELD', [], 400);
     }
 
-    const updatedClinic = await Clinic.findByIdAndUpdate(
-      clinicId,
-      { $pull: { images: imageUrl } },
-      { new: true }
-    );
+    const { data: clinic, error: fetchError } = await supabase
+      .from('clinics')
+      .select('image_urls')
+      .eq('id', clinicId)
+      .single();
 
-    if (!updatedClinic) {
+    if (fetchError || !clinic) {
       return ApiResponse.error('Clinic not found', 'NOT_FOUND', [], 404);
     }
 
-    return ApiResponse.success({ images: updatedClinic.images }, 'Image deleted successfully');
+    const currentImages = clinic.image_urls || [];
+    const newImages = currentImages.filter(img => img !== imageUrl);
+
+    const { data: updatedClinic, error: updateError } = await supabase
+      .from('clinics')
+      .update({ image_urls: newImages })
+      .eq('id', clinicId)
+      .select('image_urls')
+      .single();
+
+    if (updateError) throw updateError;
+
+    return ApiResponse.success({ images: updatedClinic.image_urls }, 'Image deleted successfully');
   } catch (error) {
     console.error('Error removing image from clinic:', error);
     return ApiResponse.error('Server error', 'SERVER_ERROR', error.message, 500);

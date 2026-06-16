@@ -7,13 +7,13 @@ import {
   appointmentCancelSchema,
   appointmentRescheduleSchema
 } from '@/validations/userValidation';
-import dbConnect from '@/utils/db';
+
 
 /**
  * Controller to handle appointment booking.
  */
 export const createAppointment = async (req) => {
-  await dbConnect();
+  
   const body = await req.json();
 
   // 1. Validate request
@@ -56,7 +56,7 @@ export const createAppointment = async (req) => {
  * Controller to fetch paginated and filtered list of appointments.
  */
 export const getAppointmentList = async (req) => {
-  await dbConnect();
+  
   
   // 1. Extract query params safely
   const url = req.nextUrl || new URL(req.url, `http://${req.headers.get('host') || 'localhost'}`);
@@ -93,7 +93,7 @@ export const getAppointmentList = async (req) => {
  * Controller to update an appointment status.
  */
 export const updateAppointmentStatus = async (req, { params }) => {
-  await dbConnect();
+  
   const { id } = await params;
   const body = await req.json();
 
@@ -135,7 +135,7 @@ export const updateAppointmentStatus = async (req, { params }) => {
  * Controller to logically cancel an appointment.
  */
 export const cancelAppointment = async (req, { params }) => {
-  await dbConnect();
+  
   const { id } = await params;
   const body = await req.json();
 
@@ -177,7 +177,7 @@ export const cancelAppointment = async (req, { params }) => {
  * Controller to fetch appointment history for a specific patient.
  */
 export const getPatientAppointmentHistory = async (req, { params }) => {
-  await dbConnect();
+  
   const { id: patientId } = await params;
 
   try {
@@ -205,7 +205,7 @@ export const getPatientAppointmentHistory = async (req, { params }) => {
  * Controller to handle patient check-in.
  */
 export const checkInAppointment = async (req, { params }) => {
-  await dbConnect();
+  
   const { id } = await params;
 
   try {
@@ -247,7 +247,7 @@ export const checkInAppointment = async (req, { params }) => {
  * Controller to fetch daily appointments for a doctor.
  */
 export const getDoctorDailyAppointments = async (req) => {
-  await dbConnect();
+  
 
   try {
     const url = req.nextUrl || new URL(req.url, `http://${req.headers.get('host') || 'localhost'}`);
@@ -270,13 +270,13 @@ export const getDoctorDailyAppointments = async (req) => {
     // Filter to return only needed data as per Ticket 1 Acceptance Criteria
     const formattedData = appointments.map(app => ({
       appointment_id: app._id,
-      patient_name: app.patientId ? `${app.patientId.firstName} ${app.patientId.lastName}` : 'Unknown Patient',
+      patient_name: app.patientId ? `${app.patientId.first_name || ''} ${app.patientId.last_name || ''}`.trim() : 'Unknown Patient',
       patient_id: app.patientId?._id,
-      patient_code: app.patientId?.patientCode || 'N/A',
-      time_slot: app.timeSlot,
+      patient_code: app.patientId?.patient_code || 'N/A',
+      time_slot: app.time_slot,
       status: app.status,
-      queue_number: app.queueNumber || null,
-      is_emergency: app.isEmergency || false
+      queue_number: app.queue_number || null,
+      is_emergency: app.is_emergency || false
     }));
 
     return ApiResponse.success(
@@ -293,7 +293,7 @@ export const getDoctorDailyAppointments = async (req) => {
  * Controller to fetch specific consultation details.
  */
 export const getConsultationDetails = async (req, { params }) => {
-  await dbConnect();
+  
   const { id } = await params;
   
   try {
@@ -312,7 +312,7 @@ export const getConsultationDetails = async (req, { params }) => {
  * Controller to complete a consultation.
  */
 export const completeConsultation = async (req, { params }) => {
-  await dbConnect();
+  
   const { id } = await params;
   const body = await req.json();
   
@@ -333,7 +333,7 @@ export const completeConsultation = async (req, { params }) => {
  * Maps snake_case payload from Ticket 3 to internal logic.
  */
 export const createAutoFollowup = async (req) => {
-  await dbConnect();
+  
   
   try {
     const body = await req.json();
@@ -364,7 +364,7 @@ export const createAutoFollowup = async (req) => {
  * Controller to reschedule an appointment.
  */
 export const rescheduleAppointment = async (req, { params }) => {
-  await dbConnect();
+  
   const { id } = await params;
   const body = await req.json();
 

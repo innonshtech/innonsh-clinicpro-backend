@@ -1,6 +1,5 @@
 import { ApiResponse } from '@/utils/apiResponse';
-import dbConnect from '@/utils/db';
-import Clinic from '@/models/Clinic';
+import { supabase } from '@/lib/supabase';
 import { clinicRegistrationSchema } from '@/validations/userValidation';
 import { withErrorHandler } from '@/utils/apiHandler';
 import bcrypt from 'bcryptjs';
@@ -17,9 +16,19 @@ import bcrypt from 'bcryptjs';
  *         description: Successful response
  */
 export const GET = withErrorHandler(async () => {
-  await dbConnect();
-  const clinics = await Clinic.find().select('-password');
-  return ApiResponse.success({ clinics }, 'Clinics fetched successfully');
+  const { data: clinics, error } = await supabase.from('clinics').select('*');
+  
+  if (error) {
+    throw error;
+  }
+
+  const formattedClinics = (clinics || []).map(c => {
+    const mapped = { ...c, _id: c.id };
+    delete mapped.password;
+    return mapped;
+  });
+
+  return ApiResponse.success({ clinics: formattedClinics }, 'Clinics fetched successfully');
 });
 
 // POST: /api/v1/clinic/register
@@ -34,7 +43,6 @@ export const GET = withErrorHandler(async () => {
  *         description: Successful response
  */
 export const POST = withErrorHandler(async (req) => {
-  await dbConnect();
   const body = await req.json();
 
   const parsed = clinicRegistrationSchema.safeParse(body);
@@ -48,35 +56,12 @@ export const POST = withErrorHandler(async (req) => {
     );
   }
 
-  const {
-    clinicName,
-    clinicType = 'general',
-    description,
-    registrationNumber,
-    taxId,
-    specialties = [],
-    logo,
-    website,
-    email,
-    phone,
-    address,
-    password,
-    city,
-    state,
-    postalCode,
-    country,
-    openingHours = {},
-    licenseDocument,
-    licenseDocumentUrl,
-    gstDocument,
-    gstDocumentUrl,
-    is24x7 = false,
-  } = parsed.data;
+  const data = parsed.data;
 
   // Cleaned Opening Hours
   const cleanedOpeningHours = {};
-  if (openingHours && typeof openingHours === 'object') {
-    for (const [day, time] of Object.entries(openingHours)) {
+  if (data.openingHours && typeof data.openingHours === 'object') {
+    for (const [day, time] of Object.entries(data.openingHours)) {
       cleanedOpeningHours[day] = {
         open: time?.open || '',
         close: time?.close || '',
@@ -84,36 +69,37 @@ export const POST = withErrorHandler(async (req) => {
     }
   }
 
+  const mappedData = Object.fromEntries(
+    Object.entries(data).map(([k, v]) => [
+      k.replace(/([A-Z])/g, '_$1').toLowerCase(),
+      v
+    ])
+  );
+
   const salt = await bcrypt.genSalt(10);
-  const hashedPassword = await bcrypt.hash(password, salt);
+  const hashedPassword = await bcrypt.hash(data.password, salt);
 
-  const newClinic = await Clinic.create({
-    clinicName,
-    clinicType,
-    description,
-    registrationNumber,
-    taxId,
-    specialties,
-    logo,
-    website,
-    email,
-    phone,
-    address,
-    password: hashedPassword,
-    city,
-    state,
-    postalCode,
-    country,
-    role: 'clinic',
-    openingHours: cleanedOpeningHours,
-    licenseDocument,
-    licenseDocumentUrl,
-    gstDocument,
-    gstDocumentUrl,
-    is24x7,
-  });
+  mappedData.password = hashedPassword;
+  mappedData.opening_hours = cleanedOpeningHours;
+  mappedData.role = 'clinic';
+  
+  // Set defaults that were in mongoose schema
+  if (mappedData.clinic_type === undefined) mappedData.clinic_type = 'general';
+  if (mappedData.specialties === undefined) mappedData.specialties = [];
+  if (mappedData.is24x7 === undefined) mappedData.is24x7 = false;
 
-  const clinicResponse = newClinic.toObject();
+  const { data: newClinic, error } = await supabase
+    .from('clinics')
+    .insert([mappedData])
+    .select()
+    .single();
+
+  if (error) {
+    console.error('Supabase clinic insert error:', error);
+    throw error;
+  }
+
+  const clinicResponse = { ...newClinic, _id: newClinic.id };
   delete clinicResponse.password;
 
   return ApiResponse.success({ clinic: clinicResponse }, 'Clinic registered successfully', 201);

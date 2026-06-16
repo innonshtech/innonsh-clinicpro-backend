@@ -1,6 +1,5 @@
 // app/api/doctor/check-availability/route.js
-import Appointment from "@/models/Appointments";
-import dbConnect from "@/utils/db";
+import { supabase } from "@/lib/supabase";
 import { NextResponse } from "next/server";
 import { ApiResponse } from "@/utils/apiResponse";
 
@@ -19,8 +18,6 @@ import { ApiResponse } from "@/utils/apiResponse";
  *         description: Internal Server Error
  */
 export async function POST(request) {
-  await dbConnect();
-
   try {
     const { doctorId, date, time } = await request.json();
 
@@ -38,12 +35,18 @@ export async function POST(request) {
       );
     }
 
-    const existingAppointment = await Appointment.findOne({
-      doctorId,
-      appointmentDate: new Date(date),
-      time,
-      status: { $ne: 'cancelled' },
-    });
+    const dateStr = new Date(date).toISOString().split('T')[0];
+
+    const { data: existingAppointment, error } = await supabase
+      .from('appointments')
+      .select('id')
+      .eq('doctor_id', doctorId)
+      .eq('appointment_date', dateStr)
+      .eq('time_slot', time)
+      .neq('status', 'cancelled')
+      .maybeSingle();
+
+    if (error) throw error;
 
     return ApiResponse.success(
       { isAvailable: !existingAppointment },

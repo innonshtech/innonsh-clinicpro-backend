@@ -1,13 +1,13 @@
 import { ApiResponse } from '@/utils/apiResponse';
 import * as followupService from '@/services/followupService';
 import { followupListQuerySchema } from '@/validations/userValidation';
-import dbConnect from '@/utils/db';
+
 
 /**
  * Controller to handle fetching follow-up appointments.
  */
 export const listFollowups = async (req) => {
-  await dbConnect();
+  
   
   const { searchParams } = new URL(req.url);
   const query = Object.fromEntries(searchParams.entries());

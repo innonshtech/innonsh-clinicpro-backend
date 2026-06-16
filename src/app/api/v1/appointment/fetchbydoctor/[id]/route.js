@@ -1,8 +1,5 @@
 import { ApiResponse } from '@/utils/apiResponse';
-import dbConnect from '@/utils/db';
-import Appointment from '@/models/Appointments';
-import Doctor from '@/models/Doctor';
-import Patient from '@/models/Patient';
+import { supabase } from '@/lib/supabase';
 import { withRoles } from '@/utils/authGuard';
 import { withErrorHandler } from '@/utils/apiHandler';
 
@@ -30,26 +27,32 @@ import { withErrorHandler } from '@/utils/apiHandler';
 export const GET = withErrorHandler(
   withRoles(['doctor', 'admin'], async (req, { params }) => {
     try {
-      await dbConnect();
-      const { id } = params; // this is the doctorId
+      const { id } = await params; // this is the doctorId
 
-      // 1. Fetch all appointments for this doctor
-      const appointments = await Appointment.find({ doctorId: id });
+      // 1. Fetch appointments + joined doctors & patients
+      const { data: appointments, error } = await supabase
+        .from('appointments')
+        .select(`
+          *,
+          doctors (id, first_name, last_name, specialty, email, phone, clinic_id),
+          patients (id, first_name, last_name, email, phone, gender, dob)
+        `)
+        .eq('doctor_id', id);
 
-      // 2. Enrich each appointment with doctor + patient details
-      const enrichedAppointments = await Promise.all(
-        appointments.map(async (appt) => {
-          const doctor = await Doctor.findById(appt.doctorId).select("-password");
-          const patient = await Patient.findById(appt.patientId).select("-password");
+      if (error) throw error;
 
-          return {
-            ...appt.toObject(),
-            patientId: appt.patientId ? appt.patientId.toString() : null,
-            doctorDetails: doctor || null,
-            patientDetails: patient || null,
-          };
-        })
-      );
+      // 2. Format to match original mongoose output
+      const enrichedAppointments = (appointments || []).map((appt) => {
+        return {
+          ...appt,
+          _id: appt.id,
+          patientId: appt.patient_id ? String(appt.patient_id) : null,
+          appointmentDate: appt.appointment_date,
+          timeSlot: appt.time_slot,
+          doctorDetails: appt.doctors ? { ...appt.doctors, _id: appt.doctors.id } : null,
+          patientDetails: appt.patients ? { ...appt.patients, _id: appt.patients.id } : null,
+        };
+      });
 
       return ApiResponse.success({ appointments: enrichedAppointments }, "Appointments fetched successfully");
     } catch (error) {

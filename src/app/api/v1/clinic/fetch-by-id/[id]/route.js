@@ -1,6 +1,5 @@
 import { ApiResponse } from '@/utils/apiResponse';
-import dbConnect from '@/utils/db';
-import Clinic from '@/models/Clinic';
+import { supabase } from '@/lib/supabase';
 
 /**
  * GET: Fetch clinic details by ID
@@ -27,17 +26,26 @@ import Clinic from '@/models/Clinic';
  */
 export async function GET(req, { params }) {
   try {
-    await dbConnect();
     const { id } = await params;
 
     if (!id) {
       return ApiResponse.error('Clinic ID is required', 'MISSING_FIELD', [], 400);
     }
 
-    const clinic = await Clinic.findById(id).select('-password');
-    if (!clinic) {
+    const { data: clinicData, error } = await supabase
+      .from('clinics')
+      .select('*')
+      .eq('id', id)
+      .maybeSingle();
+
+    if (error) throw error;
+
+    if (!clinicData) {
       return ApiResponse.error('Clinic not found', 'NOT_FOUND', [], 404);
     }
+
+    const { password, ...clinic } = clinicData;
+    clinic._id = clinic.id;
 
     return ApiResponse.success({ clinic }, 'Clinic fetched successfully');
   } catch (error) {

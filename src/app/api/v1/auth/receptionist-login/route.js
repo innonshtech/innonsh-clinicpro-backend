@@ -1,9 +1,6 @@
 import { ApiResponse } from "@/utils/apiResponse";
 import { generateToken } from "@/utils/generateToken";
-
-import dbConnect from "@/utils/db";
-import Staff from "@/models/Staff";
-import Clinic from "@/models/Clinic";
+import { supabase } from "@/lib/supabase";
 import jwt from "jsonwebtoken";
 import bcrypt from "bcryptjs";
 import { loginSchema } from '@/validations/userValidation';
@@ -28,7 +25,6 @@ if (!JWT_SECRET) {
  *         description: Successful response
  */
 export const POST = withErrorHandler(async (req) => {
-    await dbConnect();
     const body = await req.json();
 
     const parsed = loginSchema.safeParse(body);
@@ -42,7 +38,14 @@ export const POST = withErrorHandler(async (req) => {
     }
     const { email, password } = parsed.data;
 
-    const staff = await Staff.findOne({ email });
+    const { data: staff, error: sErr } = await supabase
+      .from('staff')
+      .select('*')
+      .eq('email', email)
+      .maybeSingle();
+
+    if (sErr) throw sErr;
+
     if (!staff) {
       return ApiResponse.error("Staff not found.", "USER_NOT_FOUND", [], 404);
     }
@@ -65,19 +68,26 @@ export const POST = withErrorHandler(async (req) => {
       return ApiResponse.error("Invalid password.", "INVALID_PASSWORD", [], 401);
     }
 
-    const { password: _, ...staffData } = staff.toObject();
+    const { password: _, ...staffData } = staff;
+    staffData._id = staffData.id;
+    staff._id = staff.id;
 
-    if (staffData.clinicId) {
-      const clinicObj = await Clinic.findById(staffData.clinicId);
+    if (staffData.clinic_id) {
+      const { data: clinicObj } = await supabase
+        .from('clinics')
+        .select('name') // Adjust depending on table (maybe name or clinic_name)
+        .eq('id', staffData.clinic_id)
+        .maybeSingle();
+
       if (clinicObj) {
-        staffData.clinicName = clinicObj.clinicName;
+        staffData.clinicName = clinicObj.name || clinicObj.clinic_name; // Fallback map
       }
     }
 
-    const tokens = generateToken(staff, ROLES.RECEPTIONIST, staff.clinicId);
+    const tokens = generateToken(staff, ROLES.RECEPTIONIST, staff.clinic_id);
 
     const { createSession } = await import('@/utils/sessionHelper');
-    await createSession(req, { ...staff.toObject(), role: ROLES.RECEPTIONIST }, tokens);
+    await createSession(req, { ...staffData, role: ROLES.RECEPTIONIST }, tokens);
 
     const response = ApiResponse.success({
       token: tokens.accessToken,

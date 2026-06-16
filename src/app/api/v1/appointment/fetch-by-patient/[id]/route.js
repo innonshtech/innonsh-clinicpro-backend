@@ -1,7 +1,5 @@
 import { ApiResponse } from '@/utils/apiResponse';
-import dbConnect from '@/utils/db';
-import Appointment from '@/models/Appointments';
-import Doctor from '@/models/Doctor';
+import { supabase } from '@/lib/supabase';
 
 // GET: /api/v1/appointment/fetch-by-patient/[id]
 /**
@@ -26,22 +24,40 @@ import Doctor from '@/models/Doctor';
  */
 export async function GET(req, { params }) {
   try {
-    await dbConnect();
-    const { id } = params;
+    const { id } = await params;
 
-    // 1. Find all appointments for the patient
-    const appointments = await Appointment.find({ patientId: id });
+    const { data: appointments, error } = await supabase
+      .from('appointments')
+      .select('*, doctors:doctor_id (*)')
+      .eq('patient_id', id);
 
-    // 2. Populate each appointment with corresponding doctor data
-    const enrichedAppointments = await Promise.all(
-      appointments.map(async (appt) => {
-        const doctor = await Doctor.findById(appt.doctorId).select("-password");
-        return {
-          ...appt.toObject(),
-          doctorDetails: doctor || null,
-        };
-      })
-    );
+    if (error) throw error;
+
+    const enrichedAppointments = (appointments || []).map(appt => {
+      const { doctors, ...rest } = appt;
+      
+      const doctorDetails = doctors ? {
+        ...doctors,
+        _id: doctors.id,
+        firstName: doctors.first_name,
+        lastName: doctors.last_name,
+      } : null;
+
+      if (doctorDetails) {
+        delete doctorDetails.password;
+      }
+
+      return {
+        ...rest,
+        _id: rest.id,
+        patientId: rest.patient_id,
+        doctorId: rest.doctor_id,
+        clinicId: rest.clinic_id,
+        appointmentDate: rest.appointment_date,
+        timeSlot: rest.time_slot,
+        doctorDetails
+      };
+    });
 
     return ApiResponse.success({ appointments: enrichedAppointments }, "Patient appointments fetched successfully");
   } catch (error) {

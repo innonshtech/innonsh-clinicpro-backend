@@ -2,7 +2,7 @@ import { ApiResponse } from '@/utils/apiResponse';
 import * as patientService from '@/services/patientService';
 import * as appointmentService from '@/services/appointmentService';
 import { patientRegistrationSchema, patientListQuerySchema, patientSearchQuerySchema, patientUpdateSchema } from '@/validations/userValidation';
-import dbConnect from '@/utils/db';
+
 
 import jwt from 'jsonwebtoken';
 
@@ -10,7 +10,7 @@ import jwt from 'jsonwebtoken';
  * Controller to handle patient registration request.
  */
 export const register = async (req) => {
-  await dbConnect();
+  
   
   const body = await req.json();
 
@@ -67,7 +67,7 @@ export const register = async (req) => {
  * Controller to handle fetching paginated patient list.
  */
 export const getPatientList = async (req) => {
-  await dbConnect();
+  
 
   // 1. Extract query parameters from URL
   const { searchParams } = new URL(req.url);
@@ -101,7 +101,7 @@ export const getPatientList = async (req) => {
  * Controller to handle fetching a single patient profile.
  */
 export const getPatientProfile = async (req, { params }) => {
-  await dbConnect();
+  
   const { id } = await params;
 
   if (!id) {
@@ -130,7 +130,7 @@ export const getPatientProfile = async (req, { params }) => {
  * Controller to handle deleting a patient profile.
  */
 export const deletePatient = async (req, { params }) => {
-  await dbConnect();
+  
   const { id } = await params;
 
   if (!id) {
@@ -159,7 +159,7 @@ export const deletePatient = async (req, { params }) => {
  * Controller to handle updating a patient profile.
  */
 export const updatePatient = async (req, { params }) => {
-  await dbConnect();
+  
   const { id } = await params;
   const body = await req.json();
 
@@ -204,7 +204,7 @@ export const updatePatient = async (req, { params }) => {
  * Controller to handle specialized patient search.
  */
 export const searchPatients = async (req) => {
-  await dbConnect();
+  
 
   // 1. Extract query parameters
   const { searchParams } = new URL(req.url);
@@ -238,7 +238,7 @@ export const searchPatients = async (req) => {
  * Controller to fetch patient visit history records.
  */
 export const getPatientRecords = async (req, { params }) => {
-  await dbConnect();
+  
   const { id } = await params;
 
   if (!id) {

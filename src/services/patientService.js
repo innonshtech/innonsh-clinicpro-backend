@@ -198,6 +198,22 @@ export const getPatientById = async (id, user) => {
   patient._id = patient.id;
   delete patient.password;
 
+  const mappedPatient = {
+    ...patient,
+    patientId: patient.id,
+    firstName: patient.first_name,
+    lastName: patient.last_name,
+    patientCode: patient.patient_code,
+    phoneNumber: patient.phone_number,
+    dateOfBirth: patient.date_of_birth,
+    bloodGroup: patient.blood_group,
+    emergencyContact: patient.emergency_contact,
+    addressLine1: patient.address_line1 || patient.address,
+    medicalHistory: patient.medical_history,
+    currentMedications: patient.current_medications,
+    clinicId: patient.clinic_id
+  };
+
   // Scoping enforcement
   if (role === 'receptionist' || role === 'clinic') {
     if (clinicId && patient.clinic_id && patient.clinic_id !== clinicId) {
@@ -205,7 +221,7 @@ export const getPatientById = async (id, user) => {
     }
   }
 
-  return patient;
+  return mappedPatient;
 };
 
 /**

@@ -1,8 +1,5 @@
 import { ApiResponse } from '@/utils/apiResponse';
-import dbConnect from '@/utils/db';
-import Appointment from '@/models/Appointments';
-import Receptionist from '@/models/Staff';
-import Doctor from '@/models/Doctor';
+import { supabase } from '@/lib/supabase';
 
 // POST: /api/v1/appointment/fetchtoreceptinist
 /**
@@ -21,29 +18,39 @@ import Doctor from '@/models/Doctor';
  */
 export async function POST(req) {
   try {
-    await dbConnect();
     const { receptionistId } = await req.json();
 
     // Step 1: Get the receptionist
-    const receptionist = await Receptionist.findById(receptionistId);
-    if (!receptionist) {
+    const { data: receptionist, error: recError } = await supabase
+      .from('staff')
+      .select('clinic_id')
+      .eq('id', receptionistId)
+      .single();
+
+    if (recError || !receptionist) {
       return ApiResponse.error("Receptionist not found", "NOT_FOUND", [], 404);
     }
 
-    const clinicId = receptionist.clinicId;
+    const clinicId = receptionist.clinic_id;
 
-    // Step 2: Find all doctors in that clinic
-    const doctors = await Doctor.find({ clinicId });
-    const doctorIds = doctors.map((doc) => doc._id.toString());
+    // Step 2: Fetch appointments for the clinic
+    const { data: appointmentsData, error: appError } = await supabase
+      .from('appointments')
+      .select('*')
+      .eq('clinic_id', clinicId);
 
-    if (doctorIds.length === 0) {
-      return ApiResponse.error("No doctors found for this clinic", "NOT_FOUND", [], 404);
-    }
+    if (appError) throw appError;
 
-    // Step 3: Fetch appointments for all those doctors
-    const appointments = await Appointment.find({
-      doctorId: { $in: doctorIds }
-    });
+    const appointments = (appointmentsData || []).map(a => ({
+      ...a,
+      _id: a.id,
+      appointmentDate: a.appointment_date,
+      timeSlot: a.time_slot,
+      time: a.time_slot,
+      doctorId: a.doctor_id,
+      patientId: a.patient_id,
+      clinicId: a.clinic_id
+    }));
 
     return ApiResponse.success({ appointments }, "Clinic appointments fetched successfully");
   } catch (error) {

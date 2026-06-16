@@ -1,8 +1,5 @@
 import { ApiResponse } from '@/utils/apiResponse';
-import Visit from '@/models/Visit';
-import Patient from '@/models/Patient';
-import Doctor from '@/models/Doctor';
-import dbConnect from '@/utils/db';
+import { supabase } from '@/lib/supabase';
 import { withRoles } from '@/utils/authGuard';
 
 /**
@@ -11,75 +8,42 @@ import { withRoles } from '@/utils/authGuard';
  */
 export const GET = withRoles(['receptionist', 'admin', 'doctor'], async (req) => {
     try {
-        await dbConnect();
         const { clinicId } = req.user;
 
         if (!clinicId) {
             return ApiResponse.error('Clinic ID not found in session', 'FORBIDDEN', [], 403);
         }
 
-        // Use aggregation to join Patient and Doctor info safely
-        const visits = await Visit.aggregate([
-            {
-                $match: {
-                    followUpDate: { $exists: true, $ne: null },
-                    clinicId: clinicId // Direct match on clinicId for performance
-                }
-            },
-            {
-                $lookup: {
-                    from: 'doctors',
-                    localField: 'doctorId',
-                    foreignField: '_id',
-                    as: 'doctorInfo'
-                }
-            },
-            {
-                $lookup: {
-                    from: 'patients',
-                    localField: 'patientId',
-                    foreignField: '_id',
-                    as: 'patientInfo'
-                }
-            },
-            {
-                $project: {
-                    _id: 1,
-                    followUpDate: 1,
-                    status: 1,
-                    patientId: {
-                        $ifNull: [
-                            { $arrayElemAt: ['$patientInfo', 0] },
-                            { firstName: 'Unknown', lastName: 'Patient' }
-                        ]
-                    },
-                    doctorId: {
-                        $ifNull: [
-                            { $arrayElemAt: ['$doctorInfo', 0] },
-                            { firstName: 'Unknown', lastName: 'Doctor' }
-                        ]
-                    }
-                }
-            },
-            { $sort: { followUpDate: 1 } }
-        ]);
+        const { data: visits, error } = await supabase
+            .from('visits')
+            .select(`
+                *,
+                patients (id, first_name, last_name, patient_code, phone),
+                doctors (id, first_name, last_name, specialty)
+            `)
+            .eq('clinic_id', clinicId)
+            .not('follow_up_date', 'is', null)
+            .order('follow_up_date', { ascending: true });
+
+        if (error) throw error;
 
         // Clean up the joined data to match the expected frontend format
-        const formattedVisits = visits.map(v => ({
+        const formattedVisits = (visits || []).map(v => ({
             ...v,
-            patientId: {
-                _id: v.patientId?._id,
-                firstName: v.patientId?.firstName,
-                lastName: v.patientId?.lastName,
-                patientId: v.patientId?.patientId,
-                phoneNumber: v.patientId?.phoneNumber
-            },
-            doctorId: {
-                _id: v.doctorId?._id,
-                firstName: v.doctorId?.firstName,
-                lastName: v.doctorId?.lastName,
-                specialty: v.doctorId?.specialty
-            }
+            _id: v.id,
+            patientId: v.patients ? {
+                _id: v.patients.id,
+                firstName: v.patients.first_name,
+                lastName: v.patients.last_name,
+                patientId: v.patients.patient_code, // patientId is called patient_code in supabase
+                phoneNumber: v.patients.phone
+            } : { firstName: 'Unknown', lastName: 'Patient' },
+            doctorId: v.doctors ? {
+                _id: v.doctors.id,
+                firstName: v.doctors.first_name,
+                lastName: v.doctors.last_name,
+                specialty: v.doctors.specialty
+            } : { firstName: 'Unknown', lastName: 'Doctor' }
         }));
 
         return ApiResponse.success(formattedVisits, "Follow-up list fetched successfully");

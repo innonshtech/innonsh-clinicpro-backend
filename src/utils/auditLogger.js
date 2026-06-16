@@ -1,7 +1,7 @@
-import AuditLog from '@/models/AuditLog';
+import { supabase } from '@/lib/supabase';
 
 /**
- * Helper to log critical actions to the AuditLog collection.
+ * Helper to log critical actions to the AuditLog table.
  * 
  * @param {Object} options
  * @param {string} options.userId - User performing the action
@@ -16,7 +16,22 @@ import AuditLog from '@/models/AuditLog';
  */
 export const logAudit = async (options) => {
   try {
-    await AuditLog.create(options);
+    const payload = {
+      user_id: options.userId,
+      user_role: options.userRole,
+      user_name: options.userName,
+      action: options.action,
+      resource_type: options.resourceType,
+      resource_id: options.resourceId,
+      clinic_id: options.clinicId,
+      changes: options.changes,
+      metadata: options.metadata
+    };
+
+    // Remove undefined values
+    Object.keys(payload).forEach(key => payload[key] === undefined && delete payload[key]);
+
+    await supabase.from('audit_logs').insert([payload]);
   } catch (error) {
     // We log the error but don't throw, to prevent blocking the main business logic
     console.error('[AUDIT LOG ERROR] Failed to write audit log:', error);

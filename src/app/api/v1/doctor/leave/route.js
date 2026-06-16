@@ -1,14 +1,11 @@
 import { withErrorHandler } from '@/utils/apiHandler';
 import { withRoles } from '@/utils/authGuard';
 import { ApiResponse } from '@/utils/apiResponse';
-import Leave from '@/models/Leave';
-import dbConnect from '@/utils/db';
-import mongoose from 'mongoose';
+import { supabase } from '@/lib/supabase';
 
 // POST: /api/v1/doctor/leave -> Mark a date as leave
 export const POST = withErrorHandler(
   withRoles(['doctor', 'admin', 'receptionist'], async (req) => {
-    await dbConnect();
     const body = await req.json();
     const { doctorId, date, reason } = body;
     const { clinicId } = req.user;
@@ -19,12 +16,23 @@ export const POST = withErrorHandler(
 
     const targetDate = new Date(date);
     targetDate.setHours(0, 0, 0, 0);
+    const dateStr = targetDate.toISOString().split('T')[0];
 
-    const leave = await Leave.findOneAndUpdate(
-      { doctorId: new mongoose.Types.ObjectId(doctorId), date: targetDate },
-      { clinicId, reason },
-      { upsert: true, new: true }
-    );
+    const { data: leave, error } = await supabase
+      .from('leaves')
+      .upsert({
+        doctor_id: doctorId,
+        date: dateStr,
+        clinic_id: clinicId,
+        reason: reason
+      }, { onConflict: 'doctor_id,date' })
+      .select()
+      .single();
+
+    if (error) throw error;
+    
+    // Preserve legacy ID formatting
+    leave._id = leave.id;
 
     return ApiResponse.success(leave, "Leave marked successfully");
   })
@@ -33,7 +41,6 @@ export const POST = withErrorHandler(
 // GET: /api/v1/doctor/leave -> Fetch leaves for a doctor
 export const GET = withErrorHandler(
   withRoles(['doctor', 'admin', 'receptionist'], async (req) => {
-    await dbConnect();
     const { searchParams } = new URL(req.url);
     const doctorId = searchParams.get('doctorId');
 
@@ -41,18 +48,23 @@ export const GET = withErrorHandler(
       return ApiResponse.error("Doctor ID is required", "VALIDATION_ERROR", [], 400);
     }
 
-    const leaves = await Leave.find({
-      doctorId: new mongoose.Types.ObjectId(doctorId)
-    }).sort({ date: 1 });
+    const { data: leaves, error } = await supabase
+      .from('leaves')
+      .select('*')
+      .eq('doctor_id', doctorId)
+      .order('date', { ascending: true });
 
-    return ApiResponse.success(leaves, "Leaves fetched successfully");
+    if (error) throw error;
+
+    const mappedLeaves = (leaves || []).map(l => ({ ...l, _id: l.id }));
+
+    return ApiResponse.success(mappedLeaves, "Leaves fetched successfully");
   })
 );
 
 // DELETE: /api/v1/doctor/leave -> Remove a leave
 export const DELETE = withErrorHandler(
   withRoles(['doctor', 'admin'], async (req) => {
-    await dbConnect();
     const { searchParams } = new URL(req.url);
     const leaveId = searchParams.get('id');
 
@@ -60,7 +72,13 @@ export const DELETE = withErrorHandler(
       return ApiResponse.error("Leave ID is required", "VALIDATION_ERROR", [], 400);
     }
 
-    await Leave.findByIdAndDelete(leaveId);
+    const { error } = await supabase
+      .from('leaves')
+      .delete()
+      .eq('id', leaveId);
+
+    if (error) throw error;
+
     return ApiResponse.success(null, "Leave removed successfully");
   })
 );

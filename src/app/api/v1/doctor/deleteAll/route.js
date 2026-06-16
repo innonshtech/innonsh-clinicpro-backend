@@ -1,7 +1,6 @@
 import { NextResponse } from 'next/server';
 import { ApiResponse } from '@/utils/apiResponse';
-import Doctor from '@/models/Doctor';
-import dbConnect from '@/utils/db';
+import { supabase } from '@/lib/supabase';
 import { logAudit } from '@/utils/auditLogger';
 import { withRoles } from '@/utils/authGuard';
 
@@ -23,9 +22,15 @@ import { withRoles } from '@/utils/authGuard';
  */
 export const DELETE = withRoles(['admin'], async (req, context, user) => {
   try {
-    await dbConnect();
+    const { data: result, error } = await supabase
+      .from('doctors')
+      .delete()
+      .not('id', 'is', null)
+      .select();
 
-    const result = await Doctor.deleteMany({}); // delete all records
+    if (error) throw error;
+
+    const deletedCount = result ? result.length : 0;
 
     await logAudit({
       userId: user?.id || 'system',
@@ -34,10 +39,10 @@ export const DELETE = withRoles(['admin'], async (req, context, user) => {
       resourceType: 'Doctor',
       resourceId: 'ALL',
       clinicId: 'GLOBAL',
-      metadata: { deletedCount: result.deletedCount, ip: req.headers.get('x-forwarded-for') }
+      metadata: { deletedCount, ip: req.headers.get('x-forwarded-for') }
     });
 
-    return ApiResponse.success({ deletedCount: result.deletedCount }, 'All doctors deleted successfully', 200);
+    return ApiResponse.success({ deletedCount }, 'All doctors deleted successfully', 200);
   } catch (error) {
     console.error('Error deleting all doctors:', error);
     return ApiResponse.error('Internal Server Error', undefined, [], 500);

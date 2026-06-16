@@ -1,7 +1,5 @@
 import { ApiResponse } from '@/utils/apiResponse';
-import dbConnect from '@/utils/db';
-import Appointment from '@/models/Appointments';
-import mongoose from 'mongoose';
+import { supabase } from '@/lib/supabase';
 import { withRoles } from '@/utils/authGuard';
 import { withErrorHandler } from '@/utils/apiHandler';
 
@@ -23,11 +21,10 @@ import { withErrorHandler } from '@/utils/apiHandler';
 export const PATCH = withErrorHandler(
   withRoles(['doctor'], async (req) => {
     try {
-      await dbConnect();
       const { appointmentId, description, medicines } = await req.json();
 
       // Validate appointmentId
-      if (!appointmentId || !mongoose.Types.ObjectId.isValid(appointmentId)) {
+      if (!appointmentId) {
         return ApiResponse.error("Invalid or missing appointmentId", "INVALID_ID", [], 400);
       }
 
@@ -36,11 +33,14 @@ export const PATCH = withErrorHandler(
       if (description !== undefined) updateData.description = description;
       if (medicines !== undefined) updateData.medicines = medicines;
 
-      const updatedAppointment = await Appointment.findByIdAndUpdate(
-        appointmentId,
-        { $set: updateData },
-        { new: true }
-      );
+      const { data: updatedAppointment, error } = await supabase
+        .from('appointments')
+        .update(updateData)
+        .eq('id', appointmentId)
+        .select()
+        .maybeSingle();
+
+      if (error) throw error;
 
       if (!updatedAppointment) {
         return ApiResponse.error("Appointment not found", "NOT_FOUND", [], 404);

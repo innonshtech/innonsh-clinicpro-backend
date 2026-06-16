@@ -1,15 +1,12 @@
 import { NextResponse } from 'next/server';
 import { ApiResponse } from '@/utils/apiResponse';
-import dbConnect from '@/utils/db';
-import Session from '@/models/Session';
+import { supabase } from '@/lib/supabase';
 import jwt from 'jsonwebtoken';
 
 const JWT_SECRET = process.env.JWT_SECRET;
 
 export async function POST(req) {
   try {
-    await dbConnect();
-    
     const authHeader = req.headers.get('authorization');
     if (!authHeader || !authHeader.startsWith('Bearer ')) {
       return ApiResponse.error('Missing authorization header', 'MISSING_TOKEN', [], 401);
@@ -24,7 +21,7 @@ export async function POST(req) {
     }
 
     // Invalidate all sessions for this user
-    await Session.updateMany({ userId: decoded.id }, { isActive: false });
+    await supabase.from('sessions').update({ is_active: false }).eq('user_id', decoded.id);
     
     const response = ApiResponse.success(null, "Logged out of all devices successfully");
     

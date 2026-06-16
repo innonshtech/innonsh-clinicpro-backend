@@ -1,9 +1,6 @@
 import { NextResponse } from 'next/server';
 import { ApiResponse } from '@/utils/apiResponse';
-import dbConnect from '@/utils/db';
-import Doctor from '@/models/Doctor';
-import Staff from '@/models/Staff';
-import Appointment from '@/models/Appointments';
+import { supabase } from '@/lib/supabase';
 
 export async function GET(request, { params }) {
   try {
@@ -13,57 +10,67 @@ export async function GET(request, { params }) {
       return ApiResponse.error('Clinic ID is required', 'MISSING_CLINIC_ID', null, 400);
     }
 
-    await dbConnect();
-
     // 1. Total Doctors
-    const totalDoctors = await Doctor.countDocuments({ clinicId });
+    const { count: totalDoctors } = await supabase
+      .from('doctors')
+      .select('*', { count: 'exact', head: true })
+      .eq('clinic_id', clinicId);
 
     // 2. Total Receptionists (Staff)
-    const totalReceptionists = await Staff.countDocuments({ clinicId });
+    const { count: totalReceptionists } = await supabase
+      .from('staff')
+      .select('*', { count: 'exact', head: true })
+      .eq('clinic_id', clinicId);
 
     // 3. Appointments Today
     const today = new Date();
     today.setHours(0, 0, 0, 0);
-    const tomorrow = new Date(today);
-    tomorrow.setDate(tomorrow.getDate() + 1);
+    const dateStr = today.toISOString().split('T')[0];
 
-    const appointmentsToday = await Appointment.countDocuments({
-      clinicId,
-      appointmentDate: { $gte: today, $lt: tomorrow }
-    });
+    const { count: appointmentsToday } = await supabase
+      .from('appointments')
+      .select('*', { count: 'exact', head: true })
+      .eq('clinic_id', clinicId)
+      .eq('appointment_date', dateStr);
 
     // 4. Pending Appointments Today
-    const pendingAppointments = await Appointment.countDocuments({
-      clinicId,
-      appointmentDate: { $gte: today, $lt: tomorrow },
-      status: { $in: ['booked', 'scheduled'] }
-    });
+    const { count: pendingAppointments } = await supabase
+      .from('appointments')
+      .select('*', { count: 'exact', head: true })
+      .eq('clinic_id', clinicId)
+      .eq('appointment_date', dateStr)
+      .in('status', ['booked', 'scheduled']);
 
     // 5. List of today's appointments (limit to 10 for dashboard)
-    const recentAppointmentsData = await Appointment.find({
-      clinicId,
-      appointmentDate: { $gte: today, $lt: tomorrow }
-    })
-      .sort({ timeSlot: 1 }) // Sort by time roughly
-      .limit(10)
-      .populate('doctorId', 'firstName lastName')
-      .populate('patientId', 'firstName lastName');
+    const { data: recentAppointmentsData, error: apptError } = await supabase
+      .from('appointments')
+      .select(`
+        *,
+        doctors (first_name, last_name),
+        patients (first_name, last_name)
+      `)
+      .eq('clinic_id', clinicId)
+      .eq('appointment_date', dateStr)
+      .order('time_slot', { ascending: true })
+      .limit(10);
 
-    const recentAppointments = recentAppointmentsData.map((app) => ({
-      id: app._id,
-      patientName: app.patientId ? `${app.patientId.firstName} ${app.patientId.lastName}` : app.patientName || 'Unknown Patient',
-      doctorName: app.doctorId ? `Dr. ${app.doctorId.firstName} ${app.doctorId.lastName}` : app.doctorName || 'Unknown Doctor',
-      time: app.timeSlot || new Date(app.appointmentDate).toLocaleTimeString(),
+    if (apptError) throw apptError;
+
+    const recentAppointments = (recentAppointmentsData || []).map((app) => ({
+      id: app.id,
+      patientName: app.patients ? `${app.patients.first_name} ${app.patients.last_name}` : app.patient_name || 'Unknown Patient',
+      doctorName: app.doctors ? `Dr. ${app.doctors.first_name} ${app.doctors.last_name}` : app.doctor_name || 'Unknown Doctor',
+      time: app.time_slot || new Date(app.appointment_date).toLocaleTimeString(),
       type: app.type === 'follow_up' ? 'Follow-up' : 'Checkup',
       status: app.status
     }));
 
     return ApiResponse.success({
       stats: {
-        totalDoctors,
-        totalReceptionists,
-        appointmentsToday,
-        pendingAppointments
+        totalDoctors: totalDoctors || 0,
+        totalReceptionists: totalReceptionists || 0,
+        appointmentsToday: appointmentsToday || 0,
+        pendingAppointments: pendingAppointments || 0
       },
       appointments: recentAppointments
     });

@@ -1,10 +1,5 @@
 import { ApiResponse } from '@/utils/apiResponse';
-import dbConnect from '@/utils/db';
-import Admin from '@/models/Admin';
-import Clinic from '@/models/Clinic';
-import Patient from '@/models/Patient';
-import Staff from '@/models/Staff';
-import Doctor from '@/models/Doctor';
+import { supabase } from '@/lib/supabase';
 
 /**
  * @swagger
@@ -22,26 +17,30 @@ import Doctor from '@/models/Doctor';
  */
 export async function POST(req) {
   try {
-    await dbConnect();
     const { email } = await req.json();
 
     if (!email) {
       return ApiResponse.error('Email is required', 'MISSING_EMAIL', [], 400);
     }
 
-    const [adminExists, clinicExists, patientExists, staffExists, doctorExists] = await Promise.all([
-      Admin.findOne({ email }),
-      Clinic.findOne({ email }),
-      Patient.findOne({ email }),
-      Staff.findOne({ email }),
-      Doctor.findOne({ email }),
+    const [adminRes, clinicRes, patientRes, staffRes, doctorRes] = await Promise.all([
+      supabase.from('admins').select('role').eq('email', email).maybeSingle(),
+      supabase.from('clinics').select('role').eq('email', email).maybeSingle(),
+      supabase.from('patients').select('role').eq('email', email).maybeSingle(),
+      supabase.from('staff').select('role').eq('email', email).maybeSingle(),
+      supabase.from('doctors').select('role').eq('email', email).maybeSingle(),
     ]);
 
-    const existsInAnyCollection = adminExists || clinicExists || patientExists || staffExists || doctorExists;
+    let existsInAnyCollection = null;
+    if (adminRes.data) existsInAnyCollection = { ...adminRes.data, role: adminRes.data.role || 'admin' };
+    else if (clinicRes.data) existsInAnyCollection = { ...clinicRes.data, role: clinicRes.data.role || 'clinic' };
+    else if (patientRes.data) existsInAnyCollection = { ...patientRes.data, role: patientRes.data.role || 'patient' };
+    else if (staffRes.data) existsInAnyCollection = { ...staffRes.data, role: staffRes.data.role || 'receptionist' };
+    else if (doctorRes.data) existsInAnyCollection = { ...doctorRes.data, role: doctorRes.data.role || 'doctor' };
 
     return ApiResponse.success({
       available: !existsInAnyCollection,
-      existsIn: existsInAnyCollection ? existsInAnyCollection.role || 'unknown' : null,
+      existsIn: existsInAnyCollection ? existsInAnyCollection.role : null,
     }, 'Email check completed');
 
   } catch (error) {

@@ -2,12 +2,10 @@ import { NextResponse } from 'next/server';
 import { ApiResponse } from '@/utils/apiResponse';
 import { withErrorHandler } from '@/utils/apiHandler';
 import { withRoles } from '@/utils/authGuard';
-import Appointment from '@/models/Appointments';
-import dbConnect from '@/utils/db';
+import { supabase } from '@/lib/supabase';
 
 export const PUT = withErrorHandler(
   withRoles(['admin', 'receptionist', 'doctor'], async (req) => {
-    await dbConnect();
     const body = await req.json();
     const { appointmentId, appointmentDate, timeSlot } = body;
 
@@ -16,17 +14,28 @@ export const PUT = withErrorHandler(
     }
 
     const reqDate = new Date(appointmentDate);
-    reqDate.setUTCHours(0, 0, 0, 0);
+    const dateStr = reqDate.toISOString().split('T')[0];
 
-    const updatedAppt = await Appointment.findByIdAndUpdate(
-      appointmentId,
-      { appointmentDate: reqDate, timeSlot },
-      { new: true }
-    );
+    const { data: updatedAppt, error } = await supabase
+      .from('appointments')
+      .update({ appointment_date: dateStr, time_slot: timeSlot })
+      .eq('id', appointmentId)
+      .select()
+      .maybeSingle();
+
+    if (error) {
+      console.error("Supabase update error:", error);
+      return ApiResponse.error("Database error", "DB_ERROR", error.message, 500);
+    }
 
     if (!updatedAppt) {
       return ApiResponse.error("Appointment not found", "NOT_FOUND", [], 404);
     }
+
+    // Map back for frontend compatibility
+    updatedAppt._id = updatedAppt.id;
+    updatedAppt.appointmentDate = updatedAppt.appointment_date;
+    updatedAppt.timeSlot = updatedAppt.time_slot;
 
     return ApiResponse.success({ appointment: updatedAppt }, "Appointment rescheduled successfully");
   })

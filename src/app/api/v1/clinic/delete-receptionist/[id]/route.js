@@ -1,6 +1,5 @@
 import { ApiResponse } from '@/utils/apiResponse';
-import dbConnect from '@/utils/db';
-import Staff from '@/models/Staff';
+import { supabase } from '@/lib/supabase';
 
 // DELETE: /api/v1/clinic/delete-receptionist/[id]
 /**
@@ -25,14 +24,20 @@ import Staff from '@/models/Staff';
  */
 export async function DELETE(req, { params }) {
   try {
-    await dbConnect();
     const { id } = await params;
 
     if (!id) {
       return ApiResponse.error('Receptionist ID is required', 'MISSING_FIELD', [], 400);
     }
 
-    const deletedStaff = await Staff.findByIdAndDelete(id);
+    const { data: deletedStaff, error } = await supabase
+      .from('staff')
+      .delete()
+      .eq('id', id)
+      .select()
+      .maybeSingle();
+
+    if (error) throw error;
     
     if (!deletedStaff) {
       return ApiResponse.error('Receptionist not found', 'NOT_FOUND', [], 404);

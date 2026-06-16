@@ -1,13 +1,7 @@
 import { NextResponse } from 'next/server';
 import { ApiResponse } from '@/utils/apiResponse';
 import jwt from 'jsonwebtoken';
-import dbConnect from '@/utils/db';
-import Session from '@/models/Session';
-import Admin from '@/models/Admin';
-import Clinic from '@/models/Clinic';
-import Doctor from '@/models/Doctor';
-import Patient from '@/models/Patient';
-import Staff from '@/models/Staff';
+import { supabase } from '@/lib/supabase';
 import { ROLES } from '@/constants/roles';
 import { generateToken } from '@/utils/generateToken';
 
@@ -15,8 +9,6 @@ const JWT_REFRESH_SECRET = process.env.JWT_REFRESH_SECRET || process.env.JWT_SEC
 
 export async function POST(req) {
   try {
-    await dbConnect();
-    
     // Get refresh token from cookies
     const cookieHeader = req.headers.get('cookie');
     if (!cookieHeader) {
@@ -46,38 +38,55 @@ export async function POST(req) {
     }
     
     // Check if session exists in DB (either active token or used token)
-    const session = await Session.findOne({ 
-      $or: [
-        { refreshToken: refreshToken },
-        { usedRefreshTokens: refreshToken }
-      ]
-    });
+    const { data: sessionMatches, error: sessionErr } = await supabase
+      .from('sessions')
+      .select('*')
+      .or(`refresh_token.eq.${refreshToken},used_refresh_tokens.cs.{${refreshToken}}`);
+
+    if (sessionErr) throw sessionErr;
+
+    const session = sessionMatches && sessionMatches.length > 0 ? sessionMatches[0] : null;
 
     if (!session) {
       return ApiResponse.error("Session not found", "SESSION_NOT_FOUND", [], 401);
     }
 
     // Token reuse detection: if the presented token is in the used list
-    if (session.usedRefreshTokens.includes(refreshToken)) {
+    if (session.used_refresh_tokens && session.used_refresh_tokens.includes(refreshToken)) {
       // The session is compromised. Revoke it immediately.
-      session.isActive = false;
-      await session.save();
+      await supabase
+        .from('sessions')
+        .update({ is_active: false })
+        .eq('id', session.id);
       return ApiResponse.error("Token reuse detected, session revoked", "SESSION_REVOKED", [], 401);
     }
 
     // If the token is the current active token but the session is inactive
-    if (!session.isActive) {
+    if (!session.is_active) {
       return ApiResponse.error("Session revoked", "SESSION_REVOKED", [], 401);
     }
     
     // Fetch user depending on role
     let user;
     const role = decoded.role;
-    if (role === ROLES.ADMIN) user = await Admin.findById(decoded.id);
-    else if (role === ROLES.CLINIC) user = await Clinic.findById(decoded.id);
-    else if (role === ROLES.DOCTOR) user = await Doctor.findById(decoded.id);
-    else if (role === ROLES.PATIENT) user = await Patient.findById(decoded.id);
-    else if (role === ROLES.RECEPTIONIST) user = await Staff.findById(decoded.id);
+    let table = null;
+    
+    if (role === ROLES.ADMIN) table = 'admins';
+    else if (role === ROLES.CLINIC) table = 'clinics';
+    else if (role === ROLES.DOCTOR) table = 'doctors';
+    else if (role === ROLES.PATIENT) table = 'patients';
+    else if (role === ROLES.RECEPTIONIST) table = 'staff';
+    
+    if (table) {
+      const { data: userData, error: userErr } = await supabase
+        .from(table)
+        .select('*')
+        .eq('id', decoded.id)
+        .maybeSingle();
+      if (!userErr && userData) {
+        user = { ...userData, _id: userData.id };
+      }
+    }
     
     if (!user) {
       return ApiResponse.error("User not found", "USER_NOT_FOUND", [], 404);
@@ -87,13 +96,24 @@ export async function POST(req) {
     const tokens = generateToken(user, role, decoded.clinicId);
     
     // Move the current token to the used list
-    session.usedRefreshTokens.push(session.refreshToken);
+    const usedRefreshTokens = session.used_refresh_tokens || [];
+    usedRefreshTokens.push(session.refresh_token);
+
+    const expiresAt = new Date(Date.now() + 7 * 24 * 60 * 60 * 1000).toISOString();
+    const lastActivityAt = new Date().toISOString();
 
     // Update session with new refresh token
-    session.refreshToken = tokens.refreshToken;
-    session.expiresAt = new Date(Date.now() + 7 * 24 * 60 * 60 * 1000);
-    session.lastActivityAt = Date.now();
-    await session.save();
+    const { error: updateErr } = await supabase
+      .from('sessions')
+      .update({
+        refresh_token: tokens.refreshToken,
+        used_refresh_tokens: usedRefreshTokens,
+        expires_at: expiresAt,
+        last_activity_at: lastActivityAt
+      })
+      .eq('id', session.id);
+
+    if (updateErr) throw updateErr;
     
     const response = ApiResponse.success({
       token: tokens.accessToken

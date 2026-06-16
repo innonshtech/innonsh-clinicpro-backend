@@ -16,6 +16,7 @@
     "migrate:visits": "npx ts-node --project tsconfig.migrate.json scripts/migrate/migrate-visits.ts",
     "migrate:billings": "npx ts-node --project tsconfig.migrate.json scripts/migrate/migrate-billings.ts",
     "migrate:auditlogs": "npx ts-node --project tsconfig.migrate.json scripts/migrate/migrate-auditlogs.ts",
+    "migrate:decrypt": "node scripts/migrate/decrypt-patients.js",
     "migrate:all": "npm run migrate:clinics && npm run migrate:users && npm run migrate:doctors && npm run migrate:patients && npm run migrate:appointments && npm run migrate:visits && npm run migrate:billings && npm run migrate:auditlogs"
   },
   "dependencies": {
@@ -27,12 +28,10 @@
     "jose": "^6.2.3",
     "jsonwebtoken": "^9.0.3",
     "mongo-sanitize": "^1.1.0",
-    "mongoose": "^9.7.0",
-    "mongoose-field-encryption": "^7.0.1",
     "next": "^16.2.9",
     "next-swagger-doc": "^0.4.1",
     "react": "^19.2.7",
-    "react-dom": "^19.0.0",
+    "react-dom": "^19.2.7",
     "swagger-ui-react": "^5.32.6",
     "ua-parser-js": "^2.0.10",
     "winston": "^3.19.0",

@@ -1,8 +1,6 @@
 import { NextResponse } from 'next/server';
 import { ApiResponse } from '@/utils/apiResponse';
-import dbConnect from '@/utils/db';
-import Appointment from '@/models/Appointments';
-import Doctor from '@/models/Doctor';
+import { supabase } from '@/lib/supabase';
 
 // OPTIONS for CORS
 export async function OPTIONS() {
@@ -31,25 +29,46 @@ export async function OPTIONS() {
  *         description: Internal Server Error
  */
 export async function GET(req, { params }) {
-  await dbConnect();
-
-  const { id } = params;
+  const { id } = await params;
 
   try {
-    const appointments = await Appointment.find({
-      patientId:id,
-      medicines: { $exists: true, $ne: [] }
+    const { data: appointments, error } = await supabase
+      .from('appointments')
+      .select('*, doctors:doctor_id (*)')
+      .eq('patient_id', id)
+      .not('medicines', 'is', null);
+
+    if (error) throw error;
+
+    const filteredAppointments = (appointments || []).filter(app => {
+      // JSONB might parse to array
+      if (Array.isArray(app.medicines)) {
+        return app.medicines.length > 0;
+      }
+      return false;
     });
 
-    const appointmentsWithDoctor = await Promise.all(
-      appointments.map(async (appointment) => {
-        const doctor = await Doctor.findById(appointment.doctorId).lean();
-        return {
-          ...appointment.toObject(),
-          doctorDetails: doctor || null,
-        };
-      })
-    );
+    const appointmentsWithDoctor = filteredAppointments.map(app => {
+      const { doctors, ...rest } = app;
+      
+      const doctorDetails = doctors ? {
+        ...doctors,
+        _id: doctors.id,
+        firstName: doctors.first_name,
+        lastName: doctors.last_name,
+      } : null;
+
+      return {
+        ...rest,
+        _id: rest.id,
+        patientId: rest.patient_id,
+        doctorId: rest.doctor_id,
+        clinicId: rest.clinic_id,
+        appointmentDate: rest.appointment_date,
+        timeSlot: rest.time_slot,
+        doctorDetails
+      };
+    });
 
     const response = ApiResponse.success({
       success: true,

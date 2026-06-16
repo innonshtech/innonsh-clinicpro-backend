@@ -130,7 +130,18 @@ export const getBillingHistory = async (filters, user) => {
   const bills = (data || []).map(b => ({
     ...b,
     _id: b.id,
-    patientId: b.patients ? { _id: b.patients.id, ...b.patients } : b.patient_id,
+    billingId: b.billing_id,
+    finalAmount: Number(b.final_amount) || 0,
+    totalAmount: Number(b.total_amount) || 0,
+    createdAt: b.created_at,
+    paidAt: b.paid_at,
+    patientId: b.patients ? { 
+      _id: b.patients.id, 
+      firstName: b.patients.first_name, 
+      lastName: b.patients.last_name, 
+      patientCode: b.patients.patient_code, // patient_code mapping for client code display
+      ...b.patients 
+    } : b.patient_id,
     doctorId: b.doctors ? { _id: b.doctors.id, ...b.doctors } : b.doctor_id,
   }));
 
@@ -165,9 +176,29 @@ export const getInvoiceDetails = async (id, user) => {
   }
 
   bill._id = bill.id;
-  bill.patientId = bill.patients ? { _id: bill.patients.id, ...bill.patients } : bill.patient_id;
-  bill.visitId = bill.visits ? { _id: bill.visits.id, ...bill.visits } : bill.visit_id;
-  bill.doctorId = bill.doctors ? { _id: bill.doctors.id, ...bill.doctors } : bill.doctor_id;
+  bill.billingId = bill.billing_id;
+  bill.finalAmount = Number(bill.final_amount) || 0;
+  bill.totalAmount = Number(bill.total_amount) || 0;
+  bill.createdAt = bill.created_at;
+  bill.patientId = bill.patients ? { 
+    _id: bill.patients.id, 
+    firstName: bill.patients.first_name, 
+    lastName: bill.patients.last_name,
+    patientCode: bill.patients.patient_code,
+    ...bill.patients 
+  } : bill.patient_id;
+  bill.visitId = bill.visits ? { 
+    _id: bill.visits.id, 
+    diagnosis: bill.visits.diagnosis,
+    followUpDate: bill.visits.follow_up_date,
+    ...bill.visits 
+  } : bill.visit_id;
+  bill.doctorId = bill.doctors ? { 
+    _id: bill.doctors.id, 
+    firstName: bill.doctors.first_name, 
+    lastName: bill.doctors.last_name,
+    ...bill.doctors 
+  } : bill.doctor_id;
 
   return bill;
 };

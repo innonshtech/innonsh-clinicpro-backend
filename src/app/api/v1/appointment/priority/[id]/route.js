@@ -1,38 +1,51 @@
 import { withErrorHandler } from '@/utils/apiHandler';
 import { withRoles } from '@/utils/authGuard';
-import Appointment from '@/models/Appointments';
+import { supabase } from '@/lib/supabase';
 import AppError from '@/utils/AppError';
 import { ApiResponse } from '@/utils/apiResponse';
-import dbConnect from '@/utils/db';
 
 // PUT: /api/v1/appointment/priority/[id]
 export const PUT = withErrorHandler(
   withRoles(['admin', 'receptionist'], async (req, { params }) => {
-    await dbConnect();
-    const { id } = params;
+    const { id } = await params;
     const body = await req.json().catch(() => ({}));
     
     const { isEmergency } = body;
 
-    const appointment = await Appointment.findOne({
-      $or: [
-        { _id: id.match(/^[0-9a-fA-F]{24}$/) ? id : null },
-        { appointmentId: id }
-      ].filter(Boolean)
-    });
+    const uuidRegex = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+    let reqQ = supabase.from('appointments').select('*');
+    if (uuidRegex.test(id)) {
+      reqQ = reqQ.eq('id', id);
+    } else {
+      reqQ = reqQ.eq('appointment_id', id);
+    }
+
+    const { data: appointment, error: fetchError } = await reqQ.maybeSingle();
+
+    if (fetchError) throw fetchError;
 
     if (!appointment) {
       throw new AppError('Appointment not found', 404, 'NOT_FOUND');
     }
 
-    if (req.user.clinicId && String(appointment.clinicId) !== String(req.user.clinicId)) {
+    if (req.user.clinicId && String(appointment.clinic_id) !== String(req.user.clinicId)) {
       throw new AppError('Access Denied', 403, 'FORBIDDEN');
     }
 
-    appointment.isEmergency = Boolean(isEmergency);
-    await appointment.save();
+    const { data: updatedAppt, error: updateError } = await supabase
+      .from('appointments')
+      .update({ is_emergency: Boolean(isEmergency) })
+      .eq('id', appointment.id)
+      .select()
+      .single();
 
-    return ApiResponse.success({ appointment }, 'Priority status updated successfully');
+    if (updateError) throw updateError;
+    
+    // Remap for frontend
+    updatedAppt._id = updatedAppt.id;
+    updatedAppt.isEmergency = updatedAppt.is_emergency;
+
+    return ApiResponse.success({ appointment: updatedAppt }, 'Priority status updated successfully');
   })
 );
 

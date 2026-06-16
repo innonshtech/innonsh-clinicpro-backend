@@ -36,7 +36,11 @@ const PUBLIC_PATHS = [
   '/login',
   '/receptionist-login',
   '/onelogin',
-  '/register',
+  '/api/v1/auth',
+  '/api/v1/patient/register',
+  '/api/v1/clinic/register',
+  '/api/v1/doctor/register',
+  '/api/v1/receptionist/register',
   '/signup',
   '/forgot-password',
   '/reset-password',
@@ -49,9 +53,7 @@ const PUBLIC_PATHS = [
   '/api/v1/clinic/fetch-by-id',
   '/api/v1/doctor/fetch-by-id',
   '/api/v1/clinic/fetch-doctor-clinicid',
-  '/api/v1/doctor/fetchall',
-  '/api/v1/clinic/fetch-images',
-  '/api/v1/doctor/availability'
+  '/api/v1/clinic/fetch-images'
 ];
 
 const ROLE_PATHS = {
@@ -171,21 +173,28 @@ export async function middleware(request) {
     }
   }
 
-  const response = NextResponse.next();
-  setCors(response, origin);
-  
-  const successHeaders = getRateLimitHeaders(rateLimitResult);
-  Object.entries(successHeaders).forEach(([key, value]) => response.headers.set(key, value));
+  const requestHeaders = new Headers(request.headers);
   
   // Inject user info into headers to act as downstream context
   if (decodedUser) {
     const userId = decodedUser.id || decodedUser._id;
-    if (userId) response.headers.set('x-user-id', userId.toString());
-    response.headers.set('x-user-role', decodedUser.role);
+    if (userId) requestHeaders.set('x-user-id', userId.toString());
+    requestHeaders.set('x-user-role', decodedUser.role);
     if (decodedUser.clinicId) {
-      response.headers.set('x-user-clinic-id', decodedUser.clinicId.toString());
+      requestHeaders.set('x-user-clinic-id', decodedUser.clinicId.toString());
     }
   }
+
+  const response = NextResponse.next({
+    request: {
+      headers: requestHeaders,
+    },
+  });
+  
+  setCors(response, origin);
+  
+  const successHeaders = getRateLimitHeaders(rateLimitResult);
+  Object.entries(successHeaders).forEach(([key, value]) => response.headers.set(key, value));
 
   return response;
 }
