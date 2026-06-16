@@ -1,6 +1,6 @@
 import { ApiResponse } from '@/utils/apiResponse';
 import * as visitService from '@/services/visitService';
-import { visitCreateSchema, visitUpdateSchema } from '@/validations/userValidation';
+import { visitCreateSchema, visitUpdateSchema, visitNotesSchema } from '@/validations/userValidation';
 
 
 /**
@@ -180,7 +180,6 @@ export const saveVisitNotes = async (req) => {
   
   try {
     const body = await req.json();
-    const { visitNotesSchema } = await import('@/validations/userValidation');
     
     // 1. Validate request
     const parsed = visitNotesSchema.safeParse(body);

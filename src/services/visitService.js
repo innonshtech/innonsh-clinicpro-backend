@@ -4,6 +4,7 @@
  */
 import { supabase } from '@/lib/supabase';
 import AppError from '@/utils/AppError';
+import { createAutoFollowup } from './appointmentService';
 
 /**
  * Service to start a consultation visit.
@@ -113,7 +114,6 @@ export const finishVisit = async (visitId, user, payload = {}) => {
 
   // Auto-create follow-up if needed
   if (updateData.follow_up_required && updateData.follow_up_date) {
-    const { createAutoFollowup } = await import('./appointmentService');
     await createAutoFollowup({
       visitId: updatedVisit.id,
       patientId: updatedVisit.patient_id,
