@@ -89,10 +89,13 @@ export const finishVisit = async (visitId, user, payload = {}) => {
     status: 'completed',
     end_time: new Date().toISOString(),
   };
-  if (payload.symptoms) updateData.symptoms = payload.symptoms;
   if (payload.diagnosis) updateData.diagnosis = payload.diagnosis;
   if (payload.medicines) updateData.medicines = payload.medicines;
   if (payload.clinicalNotes) updateData.notes = payload.clinicalNotes;
+  
+  if (payload.symptoms) {
+    updateData.notes = updateData.notes ? `Symptoms: ${payload.symptoms}\n\n${updateData.notes}` : `Symptoms: ${payload.symptoms}`;
+  }
   if (payload.followUpDate) {
     updateData.follow_up_date = payload.followUpDate;
     updateData.follow_up_required = true;
@@ -143,10 +146,13 @@ export const updateVisit = async (visitId, payload, user) => {
     }
 
     const updates = {};
-    if (payload.symptoms !== undefined) updates.symptoms = payload.symptoms;
     if (payload.diagnosis !== undefined) updates.diagnosis = payload.diagnosis;
     if (payload.medicines !== undefined) updates.medicines = payload.medicines;
     if (payload.clinicalNotes !== undefined) updates.notes = payload.clinicalNotes;
+    
+    if (payload.symptoms) {
+      updates.notes = updates.notes ? `Symptoms: ${payload.symptoms}\n\n${updates.notes}` : `Symptoms: ${payload.symptoms}`;
+    }
     if (payload.followUpDate !== undefined) {
       updates.follow_up_date = payload.followUpDate;
       if (payload.followUpDate) updates.follow_up_required = true;

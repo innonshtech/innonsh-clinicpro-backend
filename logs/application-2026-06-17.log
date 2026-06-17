@@ -1,0 +1,2 @@
+{"level":"error","message":"[API ERROR] POST http://localhost:3001/api/v1/visit/complete/77d91d22-f94f-441c-918b-62a0d75d3924 -> Could not find the 'symptoms' column of 'visits' in the schema cache","timestamp":"2026-06-17 11:52:35"}
+{"level":"error","message":"[API ERROR] POST http://localhost:3001/api/v1/visit/complete/77d91d22-f94f-441c-918b-62a0d75d3924 -> Could not find the 'symptoms' column of 'visits' in the schema cache","timestamp":"2026-06-17 11:53:32"}
