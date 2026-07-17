@@ -20,7 +20,7 @@
     "migrate:all": "npm run migrate:clinics && npm run migrate:users && npm run migrate:doctors && npm run migrate:patients && npm run migrate:appointments && npm run migrate:visits && npm run migrate:billings && npm run migrate:auditlogs"
   },
   "dependencies": {
-    "@supabase/supabase-js": "^2.108.2",
+    "@supabase/supabase-js": "^2.110.7",
     "@upstash/ratelimit": "^2.0.8",
     "@upstash/redis": "^1.38.0",
     "bcryptjs": "^3.0.2",
