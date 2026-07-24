@@ -30,7 +30,7 @@
     "mongo-sanitize": "^1.1.0",
     "next": "^16.2.9",
     "next-swagger-doc": "^0.4.1",
-    "react": "^19.2.7",
+    "react": "^19.2.8",
     "react-dom": "^19.2.7",
     "swagger-ui-react": "^5.32.6",
     "ua-parser-js": "^2.0.10",
