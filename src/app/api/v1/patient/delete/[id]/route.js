@@ -30,7 +30,7 @@ import * as patientController from '@/controllers/patientController';
  *         description: Unauthorized
  */
 export const DELETE = withErrorHandler(
-  withRoles(['admin', 'receptionist'], async (req, { params }) => {
+  withRoles(['admin', 'receptionist', 'doctor'], async (req, { params }) => {
     return await patientController.deletePatient(req, { params });
   })
 );

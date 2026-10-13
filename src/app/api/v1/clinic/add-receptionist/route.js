@@ -21,6 +21,11 @@ export async function POST(req) {
   try {
     const data = await req.json();
 
+    const phoneVal = data.phone || data.phoneNumber;
+    if (phoneVal && !/^[0-9]{10}$/.test(String(phoneVal).trim())) {
+      return ApiResponse.error("Phone number must be exactly 10 numeric digits", "VALIDATION_ERROR", [], 400);
+    }
+
     if (!data.password) {
       return ApiResponse.error("Password is required", "VALIDATION_ERROR", [], 400);
     }

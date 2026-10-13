@@ -1,4 +1,4 @@
-import { ApiResponse } from './apiResponse';
+﻿import { ApiResponse } from './apiResponse';
 import logger from './logger';
 
 /**
@@ -16,6 +16,13 @@ export function withRoles(allowedRoles, handler) {
       const userId = req.headers.get('x-user-id');
       const userRole = req.headers.get('x-user-role');
       const clinicId = req.headers.get('x-user-clinic-id');
+      const labId = req.headers.get('x-user-lab-id');
+      const labRole = req.headers.get('x-lab-role');
+      const labPermissionsHeader = req.headers.get('x-lab-permissions');
+      let permissions = null;
+      if (labPermissionsHeader) {
+        try { permissions = JSON.parse(labPermissionsHeader); } catch (e) {}
+      }
 
       if (!userId || !userRole) {
         // If the headers are missing, either it's a public route or something went wrong.
@@ -29,7 +36,15 @@ export function withRoles(allowedRoles, handler) {
         );
       }
 
-      req.user = { id: userId, _id: userId, role: userRole, clinicId: clinicId };
+      req.user = { 
+        id: userId, 
+        _id: userId, 
+        role: userRole, 
+        clinicId: clinicId, 
+        labId: labId || (userRole === 'lab' ? userId : null),
+        labRole: labRole || null,
+        ...(Array.isArray(permissions) ? { permissions } : {})
+      };
 
       // Double check RBAC if allowedRoles is provided, though middleware should have handled it globally.
       if (allowedRoles && allowedRoles.length > 0) {
@@ -61,4 +76,5 @@ export function withRoles(allowedRoles, handler) {
     return await handler(req, context);
   };
 }
+
 

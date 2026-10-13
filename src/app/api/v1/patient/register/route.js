@@ -74,6 +74,8 @@ import * as patientController from '@/controllers/patientController';
  *       403:
  *         description: Forbidden (Role not allowed)
  */
-export const POST = withErrorHandler(async (req) => {
-  return await patientController.register(req);
-});
+export const POST = withErrorHandler(
+  withRoles(['receptionist'], async (req) => {
+    return await patientController.register(req);
+  })
+);

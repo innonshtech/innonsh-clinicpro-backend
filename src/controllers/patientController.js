@@ -10,10 +10,6 @@ import jwt from 'jsonwebtoken';
  * Controller to handle patient registration request.
  */
 export const register = async (req) => {
-  
-  
-  const body = await req.json();
-
   let user = req.user;
   if (!user) {
     const authHeader = req.headers.get('authorization');
@@ -22,16 +18,45 @@ export const register = async (req) => {
         const token = authHeader.split(' ')[1];
         user = jwt.verify(token.trim(), process.env.JWT_SECRET);
       } catch (e) {
-        // Ignore, fall back to public registration
+        // Token invalid
       }
     }
   }
 
-  // Extract clinicId from user if available (staff registration)
-  // or from the body if it's a public registration (if provided)
-  const clinicId = user?.clinicId || body.clinicId;
+  // 1. Enforce Receptionist-only role authorization
+  if (!user || (user.role || '').toLowerCase() !== 'receptionist') {
+    return ApiResponse.error(
+      'Access Denied. Only Receptionists are authorized to create new patient records.',
+      'FORBIDDEN',
+      { yourRole: user?.role || 'unauthorized' },
+      403
+    );
+  }
 
-  // 1. Validate request
+  // 2. Derive clinic scope strictly from authenticated token context
+  const clinicId = user.clinicId;
+  if (!clinicId) {
+    return ApiResponse.error(
+      'Receptionist must be assigned to a valid clinic.',
+      'MISSING_CLINIC',
+      [],
+      400
+    );
+  }
+
+  const body = await req.json();
+
+  // Validate that request body does not attempt cross-clinic spoofing
+  if (body.clinicId && body.clinicId !== clinicId) {
+    return ApiResponse.error(
+      'Cross-clinic patient creation is forbidden.',
+      'FORBIDDEN',
+      [],
+      403
+    );
+  }
+
+  // 3. Validate request schema
   const parsed = patientRegistrationSchema.safeParse({ ...body, clinicId });
   if (!parsed.success) {
     const firstError = parsed.error.issues[0]?.message || 'Validation failed';
@@ -44,8 +69,8 @@ export const register = async (req) => {
   }
 
   try {
-    // 2. Call service
-    const patientData = await patientService.registerPatient(parsed.data);
+    // 4. Call service with validated user context
+    const patientData = await patientService.registerPatient(parsed.data, user);
 
     // 3. Return success response
     return ApiResponse.success(

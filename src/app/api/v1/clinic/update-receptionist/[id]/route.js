@@ -28,6 +28,11 @@ export async function PUT(req, { params }) {
     const { id } = await params;
     const data = await req.json();
 
+    const phoneVal = data.phone || data.phoneNumber;
+    if (phoneVal && !/^[0-9]{10}$/.test(String(phoneVal).trim())) {
+      return ApiResponse.error("Phone number must be exactly 10 numeric digits", "VALIDATION_ERROR", [], 400);
+    }
+
     if (!id) {
       return ApiResponse.error('Receptionist ID is required', 'MISSING_FIELD', [], 400);
     }

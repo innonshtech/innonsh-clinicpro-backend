@@ -61,3 +61,4 @@ export async function PATCH(req, { params }) {
     return ApiResponse.error('Server error', 'SERVER_ERROR', error.message, 500);
   }
 }
+export const DELETE = PATCH;

@@ -23,7 +23,7 @@ export const GET = withErrorHandler(async () => {
   }
 
   const formattedClinics = (clinics || []).map(c => {
-    const mapped = { ...c, _id: c.id };
+    const mapped = { ...c, _id: c.id, modules: c.modules || { lab: true, ipd: false } };
     delete mapped.password;
     return mapped;
   });
@@ -81,12 +81,21 @@ export const POST = withErrorHandler(async (req) => {
 
   mappedData.password = hashedPassword;
   mappedData.opening_hours = cleanedOpeningHours;
+  mappedData.modules = data.modules || { lab: false, ipd: false };
   mappedData.role = 'clinic';
   
   // Set defaults that were in mongoose schema
   if (mappedData.clinic_type === undefined) mappedData.clinic_type = 'general';
   if (mappedData.specialties === undefined) mappedData.specialties = [];
-  if (mappedData.is24x7 === undefined) mappedData.is24x7 = false;
+  mappedData.is_24x7 = Boolean(data.is_24x7 ?? data.is24x7 ?? false);
+  delete mappedData.is24x7;
+
+  if (mappedData.license_document_url && !mappedData.license_document) {
+    mappedData.license_document = mappedData.license_document_url;
+  }
+  if (mappedData.gst_document_url && !mappedData.gst_document) {
+    mappedData.gst_document = mappedData.gst_document_url;
+  }
 
   const { data: newClinic, error } = await supabase
     .from('clinics')

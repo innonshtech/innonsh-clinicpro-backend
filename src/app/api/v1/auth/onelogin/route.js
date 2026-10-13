@@ -1,3 +1,5 @@
+import fs from 'fs';
+import path from 'path';
 /**
  * onelogin/route.js - Unified login endpoint. Migrated from Mongoose to Supabase.
  * The API contract is IDENTICAL to the original. The frontend sends the same request.
@@ -10,6 +12,10 @@ import bcrypt from 'bcryptjs';
 import { loginSchema } from '@/validations/userValidation';
 import { withErrorHandler } from '@/utils/apiHandler';
 import { ROLES } from '@/constants/roles';
+import { labStaffService } from '@/services/labStaffService';
+import { ROLE_DEFAULT_PERMISSIONS } from '@/constants/labRoles';
+
+export const dynamic = 'force-dynamic';
 
 /**
  * @swagger
@@ -51,6 +57,25 @@ export const POST = withErrorHandler(async (req) => {
   // Search across all user tables in Supabase
   const tableLookup = [
     {
+      table: 'labs',
+      type: ROLES.LAB,
+      emailColumn: 'login_email',
+      format: (u) => ({
+        id: u.id,
+        labId: u.id,
+        name: u.lab_name,
+        labName: u.lab_name,
+        email: u.login_email,
+        contactEmail: u.email,
+        logo: u.logo,
+        status: u.status,
+        role: ROLES.LAB
+      }),
+      getClinicId: () => null,
+      getLabId: (u) => u.id,
+    },
+
+    {
       table: 'admins',
       type: ROLES.ADMIN,
       format: (u) => ({ id: u.id, name: u.name || 'Admin', email: u.email, role: ROLES.ADMIN }),
@@ -65,13 +90,33 @@ export const POST = withErrorHandler(async (req) => {
     {
       table: 'doctors',
       type: ROLES.DOCTOR,
-      format: (u) => ({ id: u.id, name: `${u.first_name} ${u.last_name}`, email: u.email, role: ROLES.DOCTOR }),
+      format: (u) => ({
+        id: u.id,
+        _id: u.id,
+        name: `${u.first_name} ${u.last_name}`,
+        firstName: u.first_name,
+        lastName: u.last_name,
+        email: u.email,
+        role: ROLES.DOCTOR,
+        clinicId: u.clinic_id,
+        clinic_id: u.clinic_id
+      }),
       getClinicId: (u) => u.clinic_id,
     },
     {
       table: 'staff',
       type: ROLES.RECEPTIONIST,
-      format: (u) => ({ id: u.id, name: `${u.first_name} ${u.last_name}`, email: u.email, role: ROLES.RECEPTIONIST }),
+      format: (u) => ({
+        id: u.id,
+        name: `${u.first_name} ${u.last_name}`,
+        firstName: u.first_name,
+        lastName: u.last_name,
+        email: u.email,
+        phone: u.phone,
+        role: u.role === 'nurse' ? ROLES.NURSE : (u.role === 'housekeeping' ? ROLES.HOUSEKEEPING : (u.role || ROLES.RECEPTIONIST)),
+        clinicId: u.clinic_id,
+        status: u.status
+      }),
       getClinicId: (u) => u.clinic_id,
     },
     {
@@ -88,7 +133,7 @@ export const POST = withErrorHandler(async (req) => {
       const { data: user } = await supabase
         .from(lookup.table)
         .select('*')
-        .ilike('email', cleanEmail)
+        .ilike(lookup.emailColumn || 'email', cleanEmail)
         .maybeSingle();
 
       if (user) {
@@ -101,13 +146,60 @@ export const POST = withErrorHandler(async (req) => {
   }
 
   if (!found) {
+    try {
+      const storeFile = path.resolve(process.cwd(), 'src/storage/ipd_store.json');
+      if (fs.existsSync(storeFile)) {
+        const store = JSON.parse(fs.readFileSync(storeFile, 'utf8'));
+        const localNurse = (store.staff || []).find(s => (s.email || '').toLowerCase() === cleanEmail);
+        if (localNurse) {
+          const lookup = tableLookup.find(l => l.table === 'staff');
+          found = { user: localNurse, ...lookup };
+        }
+      }
+    } catch (_) {}
+  }
+
+  if (!found) {
+    try {
+      const staffMember = await labStaffService.findStaffByEmailForAuth(cleanEmail);
+      if (staffMember) {
+        found = {
+          user: staffMember,
+          type: ROLES.LAB,
+          isStaff: true,
+          format: (u) => ({
+            id: u.id,
+            name: `${u.first_name || ''} ${u.last_name || ''}`.trim(),
+            firstName: u.first_name,
+            lastName: u.last_name,
+            email: u.email,
+            phone: u.phone || '',
+            role: ROLES.LAB,
+            labRole: u.role,
+            labId: u.lab_id,
+            status: u.status,
+            permissions: u.permissions || ROLE_DEFAULT_PERMISSIONS[u.role] || [],
+            qualification: u.qualification || '',
+            licenseNumber: u.license_number || '',
+            isStaff: true
+          }),
+          getClinicId: () => null,
+          getLabId: (u) => u.lab_id,
+        };
+      }
+    } catch (staffErr) {
+      console.error('[LOGIN ERROR] Exception scanning lab staff:', staffErr.message);
+    }
+  }
+
+  if (!found) {
     return ApiResponse.error('User not found', 'USER_NOT_FOUND', [], 404);
   }
 
-  const { user, format, type, getClinicId } = found;
+  const { user, format, type, getClinicId, isStaff } = found;
 
   // Password comparison (bcrypt or plain for legacy data)
-  const storedPassword = user.password || '';
+  const storedPassword = user.password || user.password_hash || '';
   const isBcryptHash = storedPassword.startsWith('$2');
   const isMatch = isBcryptHash
     ? await bcrypt.compare(password, storedPassword)
@@ -117,9 +209,62 @@ export const POST = withErrorHandler(async (req) => {
     return ApiResponse.error('Invalid password', 'INVALID_PASSWORD', [], 401);
   }
 
+  // Reject Lab if status is anything other than 'active'
+    // Reject Doctor if status is anything other than 'active'
+    // Reject Receptionist if status is anything other than 'active'
+  const effectiveRole = found.table === 'staff' ? (user.role === 'nurse' ? ROLES.NURSE : (user.role === 'housekeeping' ? ROLES.HOUSEKEEPING : type)) : type;
+  if ((effectiveRole === ROLES.RECEPTIONIST || effectiveRole === ROLES.NURSE || effectiveRole === ROLES.HOUSEKEEPING) && user.status && user.status.toLowerCase() !== 'active') {
+    return ApiResponse.error(
+      `Your ${effectiveRole} account is not active. Please contact your clinic administrator.`,
+      'ACCOUNT_INACTIVE',
+      { status: user.status },
+      403
+    );
+  }
+
+  if (type === ROLES.DOCTOR && user.status && user.status.toLowerCase() !== 'active') {
+    return ApiResponse.error(
+      'Your doctor account is not active. Please contact your clinic administrator.',
+      'ACCOUNT_INACTIVE',
+      { status: user.status },
+      403
+    );
+  }
+
+  if (isStaff) {
+    if (user.status && user.status.toLowerCase() !== 'active') {
+      return ApiResponse.error(
+        'Your laboratory staff account is deactivated. Please contact your laboratory administrator.',
+        'ACCOUNT_INACTIVE',
+        { status: user.status },
+        403
+      );
+    }
+  } else if (type === ROLES.LAB && user.status !== 'active') {
+    return ApiResponse.error(
+      'Your laboratory account is not active. Please contact the administrator.',
+      'ACCOUNT_INACTIVE',
+      { status: user.status },
+      403
+    );
+  }
+
+
   try {
     const clinicId = getClinicId(user);
-    const tokens = generateToken(user, type, clinicId);
+    const userForToken = isStaff
+      ? {
+          id: user.id,
+          email: user.email,
+          role: ROLES.LAB,
+          labRole: user.role,
+          labId: user.lab_id,
+          isStaff: true,
+          permissions: user.permissions || ROLE_DEFAULT_PERMISSIONS[user.role] || []
+        }
+      : user;
+    const effectiveRole = found.table === 'staff' && user.role === 'nurse' ? ROLES.NURSE : type;
+    const tokens = generateToken(userForToken, effectiveRole, clinicId);
 
     const { createSession } = await import('@/utils/sessionHelper');
     await createSession(req, user, tokens);

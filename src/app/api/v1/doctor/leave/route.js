@@ -14,9 +14,17 @@ export const POST = withErrorHandler(
       return ApiResponse.error("Doctor ID and Date are required", "VALIDATION_ERROR", [], 400);
     }
 
-    const targetDate = new Date(date);
-    targetDate.setHours(0, 0, 0, 0);
-    const dateStr = targetDate.toISOString().split('T')[0];
+    // Treat date as a pure calendar date (YYYY-MM-DD) without timezone shifts
+    let dateStr;
+    if (typeof date === 'string' && /^\d{4}-\d{2}-\d{2}/.test(date)) {
+      dateStr = date.split('T')[0];
+    } else {
+      const d = new Date(date);
+      const year = d.getFullYear();
+      const month = String(d.getMonth() + 1).padStart(2, '0');
+      const day = String(d.getDate()).padStart(2, '0');
+      dateStr = `${year}-${month}-${day}`;
+    }
 
     const { data: leave, error } = await supabase
       .from('leaves')

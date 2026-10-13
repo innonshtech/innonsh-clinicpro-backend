@@ -1,4 +1,4 @@
-import { NextResponse } from 'next/server';
+﻿import { NextResponse } from 'next/server';
 import { jwtVerify } from 'jose';
 import { 
   publicApiLimiter, 
@@ -37,7 +37,7 @@ const PUBLIC_PATHS = [
   '/receptionist-login',
   '/onelogin',
   '/api/v1/auth',
-  '/api/v1/patient/register',
+
   '/api/v1/clinic/register',
   '/api/v1/doctor/register',
   '/api/v1/receptionist/register',
@@ -57,13 +57,23 @@ const PUBLIC_PATHS = [
 ];
 
 const ROLE_PATHS = {
+  '/api/v1/lab/orders': ['doctor', 'receptionist', 'clinic', 'lab', 'admin'],
+  '/api/v1/lab/active': ['doctor', 'receptionist', 'clinic', 'lab', 'admin'],
+  '/api/v1/lab/catalog': ['doctor', 'receptionist', 'clinic', 'lab', 'admin'],
+  '/api/v1/lab': ['admin', 'lab'],
   '/api/v1/admin': ['admin'],
   '/api/v1/doctor/fetchall': ['doctor', 'admin', 'receptionist', 'clinic'],
   '/api/v1/doctor/availability': ['doctor', 'admin', 'receptionist', 'clinic'],
   '/api/v1/doctor/fetch-by-id': ['doctor', 'admin', 'receptionist', 'clinic'],
+  '/api/v1/doctor/update-by-id': ['doctor', 'clinic', 'admin'],
   '/api/v1/doctor': ['doctor', 'admin'],
+  '/api/v1/clinic/fetchprofiledata': ['doctor', 'clinic', 'receptionist', 'admin', 'nurse'],
+  '/api/v1/clinic/fetch-patients': ['doctor', 'clinic', 'receptionist', 'admin'],
+  '/api/v1/clinic/nurses': ['doctor', 'clinic', 'admin', 'nurse', 'receptionist'],
+  '/api/v1/ipd': ['doctor', 'clinic', 'admin', 'nurse', 'receptionist'],
   '/api/v1/clinic': ['clinic', 'receptionist', 'admin'],
   '/api/v1/receptionist': ['receptionist', 'clinic', 'admin'],
+  '/api/v1/patient/register': ['receptionist'],
   '/api/v1/patient': ['patient', 'doctor', 'clinic', 'receptionist', 'admin'],
   '/api/v1/appointment': ['patient', 'doctor', 'clinic', 'receptionist', 'admin'],
   '/api/v1/billing': ['patient', 'doctor', 'clinic', 'receptionist', 'admin'],
@@ -182,6 +192,12 @@ export async function middleware(request) {
     requestHeaders.set('x-user-role', decodedUser.role);
     if (decodedUser.clinicId) {
       requestHeaders.set('x-user-clinic-id', decodedUser.clinicId.toString());
+    }
+    if (decodedUser.labId) {
+      requestHeaders.set('x-user-lab-id', decodedUser.labId.toString());
+    }
+    if (decodedUser.labRole) {
+      requestHeaders.set('x-lab-role', decodedUser.labRole.toString());
     }
   }
 

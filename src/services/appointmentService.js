@@ -407,16 +407,20 @@ export const getPatientAppointmentHistory = async (patientId, user) => {
     targetId = pRecord.id;
   }
 
-  const { data: appointments, error } = await supabase
+  let apptQuery = supabase
     .from('appointments')
     .select(`
       *,
       doctors (first_name, last_name, specialty),
       visits!fk_visit_appointment(id, diagnosis, medicines)
     `)
-    .eq('patient_id', targetId)
-    .eq('clinic_id', clinicId)
-    .order('appointment_date', { ascending: false });
+    .eq('patient_id', targetId);
+
+  if (clinicId) {
+    apptQuery = apptQuery.eq('clinic_id', clinicId);
+  }
+
+  const { data: appointments, error } = await apptQuery.order('appointment_date', { ascending: false });
 
   if (error) throw error;
 
