@@ -1,5 +1,4 @@
 import { z } from 'zod';
-
 const envSchema = z.object({
   MONGODB_URI: z.string().url("Must be a valid MongoDB URI"),
   JWT_SECRET: z.string().min(8, "JWT_SECRET must be at least 8 characters long"),

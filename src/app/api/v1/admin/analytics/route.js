@@ -14,27 +14,30 @@ export const GET = withRoles(['admin'], async (req) => {
 
     const totalRevenue = (billingData || []).reduce((acc, curr) => acc + (curr.total_amount || 0), 0);
 
-    const patientFlow = [];
-    for (let i = 5; i >= 0; i--) {
-      const d = new Date();
-      d.setDate(1);
-      d.setMonth(new Date().getMonth() - i);
-      const monthName = d.toLocaleString('default', { month: 'short' });
-      
-      const startOfMonth = new Date(d.getFullYear(), d.getMonth(), 1).toISOString();
-      const endOfMonth = new Date(d.getFullYear(), d.getMonth() + 1, 0).toISOString();
+    // 2. Patient Flow (6 Months in parallel)
+    const monthIndices = [5, 4, 3, 2, 1, 0];
+    const patientFlow = await Promise.all(
+      monthIndices.map(async (i) => {
+        const d = new Date();
+        d.setDate(1);
+        d.setMonth(new Date().getMonth() - i);
+        const monthName = d.toLocaleString('default', { month: 'short' });
+        
+        const startOfMonth = new Date(d.getFullYear(), d.getMonth(), 1).toISOString();
+        const endOfMonth = new Date(d.getFullYear(), d.getMonth() + 1, 0).toISOString();
 
-      const [{ count: pCount }, { count: aCount }] = await Promise.all([
-        supabase.from('patients').select('*', { count: 'exact', head: true }).gte('created_at', startOfMonth).lte('created_at', endOfMonth),
-        supabase.from('appointments').select('*', { count: 'exact', head: true }).gte('created_at', startOfMonth).lte('created_at', endOfMonth)
-      ]);
+        const [{ count: pCount }, { count: aCount }] = await Promise.all([
+          supabase.from('patients').select('*', { count: 'exact', head: true }).gte('created_at', startOfMonth).lte('created_at', endOfMonth),
+          supabase.from('appointments').select('*', { count: 'exact', head: true }).gte('created_at', startOfMonth).lte('created_at', endOfMonth)
+        ]);
 
-      patientFlow.push({
-        month: monthName,
-        patients: pCount || 0,
-        appointments: aCount || 0
-      });
-    }
+        return {
+          month: monthName,
+          patients: pCount || 0,
+          appointments: aCount || 0
+        };
+      })
+    );
 
     // 3. Department Distribution
     const { data: doctorsData } = await supabase.from('doctors').select('specialty');
@@ -73,8 +76,20 @@ export const GET = withRoles(['admin'], async (req) => {
       .sort((a, b) => doctorApptCount[b] - doctorApptCount[a])
       .slice(0, 4);
 
-    const topDoctors = await Promise.all(topDoctorIds.map(async (docId) => {
-      const { data: doc } = await supabase.from('doctors').select('first_name, last_name, specialty').eq('id', docId).maybeSingle();
+    let doctorDetailsMap = {};
+    if (topDoctorIds.length > 0) {
+      const { data: topDocsData } = await supabase
+        .from('doctors')
+        .select('id, first_name, last_name, specialty')
+        .in('id', topDoctorIds);
+
+      (topDocsData || []).forEach(doc => {
+        doctorDetailsMap[doc.id] = doc;
+      });
+    }
+
+    const topDoctors = topDoctorIds.map((docId) => {
+      const doc = doctorDetailsMap[docId];
       return {
         id: docId,
         name: doc ? `Dr. ${doc.first_name} ${doc.last_name}` : 'Unknown',
@@ -82,7 +97,7 @@ export const GET = withRoles(['admin'], async (req) => {
         appointments: doctorApptCount[docId],
         rating: (Math.random() * (5.0 - 4.2) + 4.2).toFixed(1) // simulated rating
       };
-    }));
+    });
 
     // 5. Recent Activities
     const { data: recentAppointmentsData } = await supabase

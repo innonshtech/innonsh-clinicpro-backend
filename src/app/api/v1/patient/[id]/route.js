@@ -69,7 +69,7 @@ export const GET = withErrorHandler(
  *         description: Unauthorized
  */
 export const PUT = withErrorHandler(
-  withRoles(['admin', 'clinic', 'receptionist'], async (req, { params }) => {
+  withRoles(['admin', 'clinic', 'receptionist', 'doctor'], async (req, { params }) => {
     return await patientController.updatePatient(req, { params });
   })
 );

@@ -7,6 +7,8 @@ import bcrypt from 'bcryptjs';
 import AppError from '@/utils/AppError';
 import * as auditService from '@/services/auditService';
 import crypto from 'crypto';
+import { emailRegex } from '@/validations/userValidation';
+
 
 /**
  * Auto-generate a unique sequential patient code via Supabase counter table.
@@ -24,19 +26,41 @@ const getNextPatientCode = async () => {
 /**
  * Service to handle patient registration logic.
  */
-export const registerPatient = async (patientData) => {
+export const registerPatient = async (patientData, user) => {
+  // Enforce Receptionist-only role authorization at service layer
+  if (!user || (user.role || '').toLowerCase() !== 'receptionist') {
+    throw new AppError('Access Denied. Only Receptionists are authorized to create new patient records.', 403, 'FORBIDDEN');
+  }
+
+  const clinicId = user.clinicId;
+  if (!clinicId) {
+    throw new AppError('Clinic identification required for patient creation.', 400, 'MISSING_CLINIC');
+  }
+
+  if (patientData.clinicId && patientData.clinicId !== clinicId) {
+    throw new AppError('Cross-clinic patient creation is forbidden.', 403, 'FORBIDDEN');
+  }
+
   const { email, phoneNumber, password, ...otherData } = patientData;
 
-  // 1. Check for duplicate email or phone
-  const { data: existing } = await supabase
-    .from('patients')
-    .select('id, email, phone_number')
-    .or(`email.eq.${email.toLowerCase()},phone_number.eq.${phoneNumber}`)
-    .limit(1)
-    .maybeSingle();
+  const cleanEmail = email && typeof email === 'string' && email.trim() ? email.toLowerCase().trim() : null;
+  if (cleanEmail && !emailRegex.test(cleanEmail)) {
+    throw new AppError('Please enter a valid email address', 400, 'VALIDATION_ERROR');
+  }
+
+
+  // 1. Check for duplicate email (if provided) or phone
+  let dupQuery = supabase.from('patients').select('id, email, phone_number');
+  if (cleanEmail) {
+    dupQuery = dupQuery.or(`email.eq.${cleanEmail},phone_number.eq.${phoneNumber}`);
+  } else {
+    dupQuery = dupQuery.eq('phone_number', phoneNumber);
+  }
+
+  const { data: existing } = await dupQuery.limit(1).maybeSingle();
 
   if (existing) {
-    const field = existing.email === email.toLowerCase() ? 'Email' : 'Phone number';
+    const field = (cleanEmail && existing.email === cleanEmail) ? 'Email' : 'Phone number';
     throw new AppError(`${field} already registered`, 409, 'DUPLICATE_ENTRY');
   }
 
@@ -53,7 +77,8 @@ export const registerPatient = async (patientData) => {
       ...Object.fromEntries(
         Object.entries(otherData).map(([k, v]) => [k.replace(/([A-Z])/g, '_$1').toLowerCase(), v])
       ),
-      email: email.toLowerCase(),
+      clinic_id: clinicId,
+      email: cleanEmail,
       phone_number: phoneNumber,
       password: hashedPassword,
       patient_code: patientCode,
@@ -66,6 +91,7 @@ export const registerPatient = async (patientData) => {
 
   const result = { ...newPatient };
   delete result.password;
+  result._id = newPatient.id;
   return result;
 };
 
@@ -103,6 +129,7 @@ export const getPatients = async (user, filters) => {
 
   let req = supabase.from('patients').select(`
     id, first_name, last_name, email, phone_number, patient_code, gender, date_of_birth, created_at, clinic_id,
+    address, city, blood_group, emergency_contact, medical_history,
     appointments (
       id, appointment_date, status,
       doctors (first_name, last_name)
@@ -142,6 +169,10 @@ export const getPatients = async (user, filters) => {
       dateOfBirth: p.date_of_birth,
       createdAt: p.created_at,
       clinicId: p.clinic_id,
+      address: p.address || p.city || null,
+      medicalHistory: p.medical_history || null,
+      bloodGroup: p.blood_group || null,
+      emergencyContact: p.emergency_contact || null,
       lastVisit: last?.appointment_date || null,
       doctor: last?.doctors ? `Dr. ${last.doctors.first_name} ${last.doctors.last_name}` : null,
     };
@@ -215,7 +246,7 @@ export const getPatientById = async (id, user) => {
   };
 
   // Scoping enforcement
-  if (role === 'receptionist' || role === 'clinic') {
+  if (role === 'receptionist' || role === 'clinic' || role === 'doctor') {
     if (clinicId && patient.clinic_id && patient.clinic_id !== clinicId) {
       throw new AppError('Access Denied', 403, 'FORBIDDEN');
     }
@@ -229,6 +260,13 @@ export const getPatientById = async (id, user) => {
  */
 export const deletePatient = async (id, user) => {
   const patient = await getPatientById(id, user);
+  if (patientData.email !== undefined && patientData.email !== null) {
+    const cleanEmail = typeof patientData.email === 'string' && patientData.email.trim() ? patientData.email.toLowerCase().trim() : null;
+    if (cleanEmail && !emailRegex.test(cleanEmail)) {
+      throw new AppError('Please enter a valid email address', 400, 'VALIDATION_ERROR');
+    }
+  }
+
 
   const { error } = await supabase.from('patients').delete().eq('id', patient.id);
   if (error) throw error;

@@ -59,6 +59,10 @@ const nextConfig = {
         destination: '/api/v1/patient/:path*',
       },
       {
+        source: '/api/onelogin',
+        destination: '/api/v1/auth/onelogin',
+      },
+      {
         source: '/api/onelogin/:path*',
         destination: '/api/v1/auth/onelogin/:path*',
       },

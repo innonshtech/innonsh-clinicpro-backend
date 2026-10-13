@@ -1,9 +1,12 @@
+import path from 'path';
+import fs from 'fs';
 import { NextResponse } from 'next/server';
 import { ApiResponse } from '@/utils/apiResponse';
 import jwt from 'jsonwebtoken';
 import { supabase } from '@/lib/supabase';
 import { ROLES } from '@/constants/roles';
 import { generateToken } from '@/utils/generateToken';
+import { labStaffService } from '@/services/labStaffService';
 
 const JWT_REFRESH_SECRET = process.env.JWT_REFRESH_SECRET || process.env.JWT_SECRET;
 
@@ -75,7 +78,12 @@ export async function POST(req) {
     else if (role === ROLES.CLINIC) table = 'clinics';
     else if (role === ROLES.DOCTOR) table = 'doctors';
     else if (role === ROLES.PATIENT) table = 'patients';
-    else if (role === ROLES.RECEPTIONIST) table = 'staff';
+    else if (role === ROLES.RECEPTIONIST || role === ROLES.NURSE || role === 'nurse' || role === ROLES.HOUSEKEEPING || role === 'housekeeping') {
+      table = 'staff';
+    }
+    else if (role === ROLES.LAB || role === 'lab') {
+      table = 'labs';
+    }
     
     if (table) {
       const { data: userData, error: userErr } = await supabase
@@ -87,9 +95,46 @@ export async function POST(req) {
         user = { ...userData, _id: userData.id };
       }
     }
+
+    if (!user && (decoded.role === ROLES.LAB || decoded.role === 'lab')) {
+      const staffUser = await labStaffService.findStaffByIdForAuth(decoded.id);
+      if (staffUser && staffUser.status === 'active') {
+        user = {
+          ...staffUser,
+          _id: staffUser.id,
+          role: ROLES.LAB,
+          labRole: staffUser.role,
+          labId: staffUser.lab_id,
+          isStaff: true
+        };
+      }
+    }
     
+    if (!user && (role === ROLES.NURSE || role === 'nurse' || role === ROLES.RECEPTIONIST || role === 'receptionist' || role === 'housekeeping')) {
+      try {
+        const storeFile = path.resolve(process.cwd(), 'src/storage/ipd_store.json');
+        if (fs.existsSync(storeFile)) {
+          const store = JSON.parse(fs.readFileSync(storeFile, 'utf8'));
+          const localStaff = (store.staff || []).find(s => s.id === decoded.id);
+          if (localStaff) {
+            user = { ...localStaff, _id: localStaff.id };
+          }
+        }
+      } catch (_) {}
+    }
+
     if (!user) {
       return ApiResponse.error("User not found", "USER_NOT_FOUND", [], 404);
+    }
+
+    // Preserve inactive-account blocking (inactive nurse / receptionist / doctor / lab)
+    if (user.status && user.status.toLowerCase() !== 'active') {
+      return ApiResponse.error(
+        `Your ${role} account is not active. Please contact your clinic administrator.`,
+        'ACCOUNT_INACTIVE',
+        { status: user.status },
+        403
+      );
     }
     
     // Generate new tokens (rotation)

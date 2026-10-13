@@ -1,27 +1,19 @@
 import { ApiResponse } from '@/utils/apiResponse';
 import { supabase } from '@/lib/supabase';
+import fs from 'fs';
+import path from 'path';
+
+function getLocalStore() {
+  try {
+    const storePath = path.resolve(process.cwd(), 'src/storage/ipd_store.json');
+    if (fs.existsSync(storePath)) {
+      return JSON.parse(fs.readFileSync(storePath, 'utf8'));
+    }
+  } catch (_) {}
+  return { patients: [] };
+}
 
 // GET: /api/v1/clinic/fetch-patients/[clinicId]
-/**
- * @swagger
- * /api/v1/clinic/fetch-patients/{clinicId}:
- *   get:
- *     summary: GET request for /api/v1/clinic/fetch-patients/{clinicId}
- *     tags: [Clinic]
- *     parameters:
- *       - in: path
- *         name: clinicId
- *         required: true
- *         schema:
- *           type: string
- *     responses:
- *       200:
- *         description: Successful response
- *       400:
- *         description: Bad Request
- *       500:
- *         description: Internal Server Error
- */
 export async function GET(req, { params }) {
   try {
     const { clinicId } = await params;
@@ -30,51 +22,77 @@ export async function GET(req, { params }) {
       return ApiResponse.error('Clinic ID is required', 'MISSING_FIELD', [], 400);
     }
 
-    // 1. Fetch patients directly linked to this clinic
-    const { data: directPatients, error: pError } = await supabase
-      .from('patients')
-      .select('*')
-      .eq('clinic_id', clinicId);
-      
-    if (pError) throw pError;
+    let allPatients = [];
 
-    // 2. Fetch all appointments in this clinic to catch cross-clinic patients
-    const { data: appointments, error: aError } = await supabase
-      .from('appointments')
-      .select('patient_id')
-      .eq('clinic_id', clinicId);
-      
-    if (aError) throw aError;
-
-    let allPatients = [...(directPatients || [])];
-
-    const appointmentPatientIds = [...new Set((appointments || []).map(a => a.patient_id).filter(id => id))];
-    const existingIds = new Set(allPatients.map(p => p.id));
-    const missingIds = appointmentPatientIds.filter(id => !existingIds.has(id));
-    
-    if (missingIds.length > 0) {
-      // 3. Fetch missing patients
-      const { data: extraPatients } = await supabase
+    // 1. Fetch patients directly linked to this clinic in Supabase
+    try {
+      const { data: directPatients, error: pError } = await supabase
         .from('patients')
         .select('*')
-        .in('id', missingIds);
-        
-      allPatients = [...allPatients, ...(extraPatients || [])];
+        .eq('clinic_id', clinicId);
+
+      if (!pError && directPatients) {
+        allPatients = [...directPatients];
+      }
+    } catch (dbErr) {
+      console.warn('Supabase patients query fallback:', dbErr.message);
     }
 
-    // Preserve legacy formatting for frontend
+    // 2. Fetch all appointments in this clinic to catch cross-clinic patients
+    try {
+      const { data: appointments, error: aError } = await supabase
+        .from('appointments')
+        .select('patient_id')
+        .eq('clinic_id', clinicId);
+
+      if (!aError && appointments && appointments.length > 0) {
+        const appointmentPatientIds = [...new Set(appointments.map(a => a.patient_id).filter(Boolean))];
+        const existingIds = new Set(allPatients.map(p => p.id));
+        const missingIds = appointmentPatientIds.filter(id => !existingIds.has(id));
+
+        if (missingIds.length > 0) {
+          const { data: extraPatients } = await supabase
+            .from('patients')
+            .select('*')
+            .in('id', missingIds);
+
+          if (extraPatients) {
+            allPatients = [...allPatients, ...extraPatients];
+          }
+        }
+      }
+    } catch (_) {}
+
+    // 3. Fallback and merge from local store for hybrid/local development
+    const store = getLocalStore();
+    const localPatients = (store.patients || []).filter(p => p.clinic_id === clinicId || p.clinicId === clinicId);
+    for (const lp of localPatients) {
+      const lpId = lp.id || lp._id;
+      if (!allPatients.some(p => (p.id || p._id) === lpId)) {
+        allPatients.push(lp);
+      }
+    }
+
+    // Preserve uniform formatting for frontend consumption
     allPatients = allPatients.map(p => {
+      const id = p.id || p._id;
       const mapped = { 
         ...p, 
-        _id: p.id,
-        patientId: p.id,
-        firstName: p.first_name,
-        lastName: p.last_name,
-        phoneNumber: p.phone_number,
-        patientCode: p.patient_code,
-        bloodGroup: p.blood_group,
-        dateOfBirth: p.date_of_birth,
-        clinicId: p.clinic_id
+        id,
+        _id: id,
+        patientId: id,
+        firstName: p.first_name || p.firstName || '',
+        lastName: p.last_name || p.lastName || '',
+        first_name: p.first_name || p.firstName || '',
+        last_name: p.last_name || p.lastName || '',
+        phoneNumber: p.phone_number || p.phoneNumber || p.phone || '',
+        phone_number: p.phone_number || p.phoneNumber || p.phone || '',
+        patientCode: p.patient_code || p.patientCode || id,
+        patient_code: p.patient_code || p.patientCode || id,
+        bloodGroup: p.blood_group || p.bloodGroup || '',
+        dateOfBirth: p.date_of_birth || p.dateOfBirth || '',
+        clinicId: p.clinic_id || p.clinicId || clinicId,
+        clinic_id: p.clinic_id || p.clinicId || clinicId
       };
       delete mapped.password;
       return mapped;

@@ -38,6 +38,9 @@ export async function POST(req) {
       return ApiResponse.error("Invalid password", "INVALID_PASSWORD", [], 401);
     }
 
+    if (user.status && user.status.toLowerCase() !== 'active') {
+      return ApiResponse.error("Your doctor account is not active. Please contact your clinic administrator.", "ACCOUNT_INACTIVE", [], 403);
+    }
     user._id = user.id; // Map id for generateToken
 
     const tokens = generateToken(user, user.role || 'doctor');

@@ -23,8 +23,10 @@ export const POST = withErrorHandler(async (req) => {
 
   const parsed = doctorRegistrationSchema.safeParse(body);
   if (!parsed.success) {
+    const firstIssue = parsed.error.issues[0];
+    const firstMsg = firstIssue ? `${firstIssue.path.join('.') || 'field'}: ${firstIssue.message}` : 'Validation failed';
     return ApiResponse.error(
-      'Validation failed',
+      firstMsg,
       'VALIDATION_ERROR',
       parsed.error.format(),
       400
@@ -32,6 +34,12 @@ export const POST = withErrorHandler(async (req) => {
   }
 
   const data = parsed.data;
+
+  // The doctors table has a NOT NULL constraint on password.
+  // There is no invitation/email flow, so a password must always be provided explicitly.
+  if (!data.password || typeof data.password !== 'string' || data.password.trim() === '') {
+    return ApiResponse.error('Password is required', 'VALIDATION_ERROR', [], 400);
+  }
 
   // Check for existing doctor
   const { data: existingDoctor, error: fetchError } = await supabase
@@ -46,23 +54,61 @@ export const POST = withErrorHandler(async (req) => {
     return ApiResponse.error('Email or license number already exists', 'DUPLICATE_ENTRY', [], 400);
   }
 
-  // Hash password
-  const hashedPassword = await bcrypt.hash(data.password, 12);
+  // Explicitly construct Supabase insert payload using confirmed doctors table columns
+  const doctorData = {
+    first_name: data.firstName,
+    last_name: data.lastName,
+    email: data.email,
+    phone: data.phone || null,
+    specialty: data.specialty || null,
+    experience: data.experience || 0,
+    license_number: data.licenseNumber || null,
+    date_of_birth: data.dateOfBirth || null,
+    gender: data.gender || null,
+    qualifications: (Array.isArray(data.qualifications) && data.qualifications.length > 0)
+      ? data.qualifications
+      : (data.qualification
+          ? (typeof data.qualification === 'string'
+              ? data.qualification.split(',').map(s => s.trim()).filter(Boolean)
+              : [data.qualification])
+          : (data.qualifications || [])),
+    home_address: data.homeAddress || data.home_address || data.address || null,
+    hospital_address: data.hospitalAddress || null,
+    location: data.location || null,
+    department: data.department || null,
+    bio: data.bio || null,
+    consultant_fee: data.consultantFee || null,
+    available: data.available || null,
+    available_days: data.available?.days || null,
+    profile_image: data.profileImage || null,
+    sup_speciality: data.supSpeciality || null,
+    clinic_id: data.clinicId || null,
+    session_time: data.sessionTime || null,
+    degree_certificate: data.degreeCertificate || null,
+    identity_proof: data.identityProof || null,
+    emergency_contact: data.emergencyContact || null,
+    emergency_phone: data.emergencyPhone || null,
+    emergency_relationship: data.emergencyRelationship || null,
+    status: data.status || 'active',
+    role: 'doctor',
+  };
 
-  // Convert camelCase to snake_case for Supabase
-  const mappedData = Object.fromEntries(
-    Object.entries(data).map(([k, v]) => [
-      k.replace(/([A-Z])/g, '_$1').toLowerCase(),
-      v
-    ])
-  );
+  if (data.hospitalNumber) {
+    doctorData.hospital_number = data.hospitalNumber;
+  }
+  if (data.hospital) {
+    doctorData.hospital = data.hospital;
+  }
 
-  mappedData.password = hashedPassword;
+  // Hash password only if a non-empty password is explicitly provided
+  if (data.password && typeof data.password === 'string' && data.password.trim() !== '') {
+    doctorData.password = await bcrypt.hash(data.password, 10);
+  }
 
   // Create doctor
   const { data: newDoctor, error: insertError } = await supabase
     .from('doctors')
-    .insert([mappedData])
+    .insert([doctorData])
     .select()
     .single();
 

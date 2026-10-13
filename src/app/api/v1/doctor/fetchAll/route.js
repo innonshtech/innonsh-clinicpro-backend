@@ -19,13 +19,15 @@ import { supabase } from '@/lib/supabase';
  */
 export async function GET() {
   try {
-    const { data: doctors, error: docsError } = await supabase.from('doctors').select('*');
+    const { data: doctors, error: docsError } = await supabase
+      .from('doctors')
+      .select('*')
+      .order('created_at', { ascending: false });
     if (docsError) throw docsError;
 
     // Check leaves for today
     const today = new Date();
-    today.setHours(0, 0, 0, 0);
-    const dateStr = today.toISOString().split('T')[0];
+    const dateStr = `${today.getFullYear()}-${String(today.getMonth() + 1).padStart(2, '0')}-${String(today.getDate()).padStart(2, '0')}`;
 
     const { data: leaves } = await supabase
       .from('leaves')
@@ -43,6 +45,12 @@ export async function GET() {
       profileImage: doc.profile_image,
       dateOfBirth: doc.date_of_birth,
       consultantFee: doc.consultant_fee,
+      consultationFee: doc.consultant_fee,
+      homeAddress: doc.home_address,
+      location: doc.location,
+      department: doc.department,
+      bio: doc.bio,
+      availableTime: doc.available_time,
       licenseNumber: doc.license_number,
       hospitalAddress: doc.hospital_address,
       hospitalNumber: doc.hospital_number,
@@ -51,12 +59,15 @@ export async function GET() {
       degreeCertificate: doc.degree_certificate,
       identityProof: doc.identity_proof,
       supSpeciality: doc.sup_speciality,
-      isVerified: doc.is_verified || false
+      isVerified: doc.is_verified || false,
+      emergencyContact: doc.emergency_contact,
+      emergencyPhone: doc.emergency_phone,
+      emergencyRelationship: doc.emergency_relationship
     }));
 
     return ApiResponse.success({ doctors: enrichedDoctors });
   } catch (error) {
-    console.error('❌ Error fetching doctors:', error);
+    console.error('Error fetching doctors:', error);
     return ApiResponse.error(
       'Internal Server Error', 
       'FETCH_ALL_ERROR', 

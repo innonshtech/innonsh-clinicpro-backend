@@ -60,6 +60,7 @@ export async function GET(req, { params }) {
       logo: clinicData.logo || '',
       specialties: clinicData.specialties || [],
       openingHours: clinicData.opening_hours || undefined,
+      modules: clinicData.modules || { lab: true, ipd: false },
       createdAt: clinicData.created_at,
       updatedAt: clinicData.updated_at
     };

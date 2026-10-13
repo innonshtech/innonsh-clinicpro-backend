@@ -52,16 +52,25 @@ export async function GET(req, { params }) {
       availableDays: doctor.available_days,
       sessionTime: doctor.session_time,
       patientLoad: doctor.patient_load,
-      consultationFee: doctor.consultation_fee,
-      consultantFee: doctor.consultation_fee,
+      consultationFee: doctor.consultant_fee || doctor.consultation_fee,
+      consultantFee: doctor.consultant_fee || doctor.consultation_fee,
+      identityProof: doctor.identity_proof,
+      degreeCertificate: doctor.degree_certificate,
+      isVerified: doctor.is_verified || false,
       profileImage: doctor.profile_image,
       dateOfBirth: doctor.date_of_birth,
       licenseNumber: doctor.license_number,
       hospitalAddress: doctor.hospital_address,
       supSpeciality: doctor.sup_speciality,
       homeAddress: doctor.home_address,
+      location: doctor.location,
+      department: doctor.department,
+      bio: doctor.bio,
       startTime: doctor.start_time,
-      endTime: doctor.end_time
+      endTime: doctor.end_time,
+      emergencyContact: doctor.emergency_contact,
+      emergencyPhone: doctor.emergency_phone,
+      emergencyRelationship: doctor.emergency_relationship
     };
     
     delete mappedDoctor.password;

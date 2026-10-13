@@ -74,9 +74,13 @@ export const setDoctorAvailability = async (data, user) => {
     throw new AppError('Duplicate slots are not allowed', 400, 'DUPLICATE_ENTRY');
   }
 
-  const normalizedDate = new Date(date);
-  normalizedDate.setHours(0, 0, 0, 0);
-  const dateStr = normalizedDate.toISOString().split('T')[0];
+  let dateStr;
+  if (typeof date === 'string' && /^\d{4}-\d{2}-\d{2}/.test(date)) {
+    dateStr = date.split('T')[0];
+  } else {
+    const d = new Date(date);
+    dateStr = `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`;
+  }
 
   const { data: result, error } = await supabase
     .from('availabilities')
@@ -98,11 +102,21 @@ export const setDoctorAvailability = async (data, user) => {
  * Service to fetch available slots for a doctor on a specific date.
  */
 export const getAvailableSlots = async (doctorId, date, clinicId) => {
-  const [year, month, day] = date.split('-').map(Number);
-  const targetDate = new Date(year, month - 1, day);
-  targetDate.setHours(0, 0, 0, 0);
-  const dateStr = targetDate.toISOString().split('T')[0];
-  const dayName = new Intl.DateTimeFormat('en-US', { weekday: 'long' }).format(targetDate);
+  let dateStr;
+  let dayName;
+  if (typeof date === 'string' && /^\d{4}-\d{2}-\d{2}/.test(date)) {
+    dateStr = date.split('T')[0];
+    const [year, month, day] = dateStr.split('-').map(Number);
+    const targetDate = new Date(year, month - 1, day, 12, 0, 0);
+    dayName = new Intl.DateTimeFormat('en-US', { weekday: 'long' }).format(targetDate);
+  } else {
+    const targetDate = new Date(date);
+    const year = targetDate.getFullYear();
+    const month = String(targetDate.getMonth() + 1).padStart(2, '0');
+    const day = String(targetDate.getDate()).padStart(2, '0');
+    dateStr = `${year}-${month}-${day}`;
+    dayName = new Intl.DateTimeFormat('en-US', { weekday: 'long' }).format(new Date(year, targetDate.getMonth(), targetDate.getDate(), 12, 0, 0));
+  }
 
   logSub(`Fetching slots for Doctor: ${doctorId}, Date: ${date} (${dayName}), Clinic: ${clinicId}`);
 

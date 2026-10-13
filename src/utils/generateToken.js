@@ -28,12 +28,17 @@ export const generateToken = (user, role, clinicId = null) => {
 
   // If clinicId is not provided, try to get it from the user object
   const effectiveClinicId = clinicId || user.clinicId || (role === 'clinic' ? (user.id || user._id) : null);
+  const effectiveLabId = user.labId || user.lab_id || (role === 'lab' && !user.isStaff ? (user.id || user._id) : null);
 
   const payload = {
     id: user.id || user._id,
     email: user.email,
     role: role || user.role,
     clinicId: effectiveClinicId,
+    ...(effectiveLabId ? { labId: effectiveLabId } : {}),
+    ...(user.labRole ? { labRole: user.labRole } : {}),
+    ...(user.permissions ? { permissions: user.permissions } : {}),
+    ...(user.isStaff !== undefined ? { isStaff: user.isStaff } : {})
   };
 
   const accessToken = jwt.sign(payload, secret, { expiresIn: '15m' });
