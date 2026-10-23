@@ -7,7 +7,7 @@ import * as billingController from '@/controllers/billingController';
  * Fetches a list of invoices with filters and pagination
  */
 export const GET = withErrorHandler(
-  withRoles(['doctor', 'receptionist', 'admin'], async (req) => {
+  withRoles(['doctor', 'receptionist', 'clinic', 'admin'], async (req) => {
     return await billingController.listBills(req);
   })
 );

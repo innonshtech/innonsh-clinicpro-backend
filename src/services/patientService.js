@@ -1,3 +1,5 @@
+import fs from 'fs';
+import path from 'path';
 /**
  * patientService.js - Migrated from Mongoose to Supabase.
  * All API contracts are preserved exactly.
@@ -64,8 +66,11 @@ export const registerPatient = async (patientData, user) => {
     throw new AppError(`${field} already registered`, 409, 'DUPLICATE_ENTRY');
   }
 
-  // 2. Hash password
-  const hashedPassword = await bcrypt.hash(password, 12);
+  // 2. Hash password (auto-generate secure compliant password if not provided by receptionist)
+  const finalPassword = (password && typeof password === 'string' && password.trim())
+    ? password.trim()
+    : `Pat@${crypto.randomBytes(6).toString('hex')}1Aa`;
+  const hashedPassword = await bcrypt.hash(finalPassword, 12);
 
   // 3. Auto-generate patientCode
   const patientCode = await getNextPatientCode();
@@ -92,6 +97,8 @@ export const registerPatient = async (patientData, user) => {
   const result = { ...newPatient };
   delete result.password;
   result._id = newPatient.id;
+  result.patientId = newPatient.id;
+  result.patientCode = newPatient.patient_code;
   return result;
 };
 
@@ -119,7 +126,7 @@ const getPatientScopingQuery = async (user) => {
  * Service to fetch paginated patient list with filters and role-based access.
  */
 export const getPatients = async (user, filters) => {
-  const { page, limit, name, phoneNumber, startDate, endDate } = filters;
+  const { page, limit, name, phoneNumber, startDate, endDate, sortBy, sortOrder } = filters;
   const role = (user.role || '').toLowerCase();
   
   const scopingQuery = await getPatientScopingQuery(user);
@@ -147,7 +154,19 @@ export const getPatients = async (user, filters) => {
   if (startDate) req = req.gte('created_at', startDate);
   if (endDate) req = req.lte('created_at', endDate);
 
-  req = req.order('created_at', { ascending: false }).range((page - 1) * limit, page * limit - 1);
+  if (sortBy === 'name') {
+    const isAsc = (sortOrder || 'asc').toLowerCase() === 'asc';
+    req = req.order('first_name', { ascending: isAsc }).order('last_name', { ascending: isAsc });
+  } else if (sortBy === 'registrationDate') {
+    const isAsc = (sortOrder || 'desc').toLowerCase() === 'asc';
+    req = req.order('created_at', { ascending: isAsc });
+  } else {
+    // Default ordering by name A-Z for receptionist listing
+    const isAsc = (sortOrder || 'asc').toLowerCase() === 'asc';
+    req = req.order('first_name', { ascending: isAsc }).order('last_name', { ascending: isAsc });
+  }
+
+  req = req.range((page - 1) * limit, page * limit - 1);
 
   const { data, error, count } = await req;
   if (error) throw error;
@@ -260,13 +279,75 @@ export const getPatientById = async (id, user) => {
  */
 export const deletePatient = async (id, user) => {
   const patient = await getPatientById(id, user);
-  if (patientData.email !== undefined && patientData.email !== null) {
-    const cleanEmail = typeof patientData.email === 'string' && patientData.email.trim() ? patientData.email.toLowerCase().trim() : null;
-    if (cleanEmail && !emailRegex.test(cleanEmail)) {
-      throw new AppError('Please enter a valid email address', 400, 'VALIDATION_ERROR');
-    }
+
+  // 1. Check for active/pending/in-progress linked appointments (cancelled appointments do NOT block deletion)
+  const ACTIVE_APPOINTMENT_STATUSES = ['booked', 'scheduled', 'checked_in', 'checkedIn', 'in_progress', 'pending'];
+  const { count: activeApptCount } = await supabase
+    .from('appointments')
+    .select('id', { count: 'exact', head: true })
+    .eq('patient_id', patient.id)
+    .in('status', ACTIVE_APPOINTMENT_STATUSES);
+
+  if (activeApptCount && activeApptCount > 0) {
+    throw new AppError(`Cannot delete patient with ${activeApptCount} active appointment(s). Please cancel or complete them first.`, 400, 'LINKED_RECORDS');
   }
 
+  // 2. Check for completed clinical appointments
+  const { count: completedApptCount } = await supabase
+    .from('appointments')
+    .select('id', { count: 'exact', head: true })
+    .eq('patient_id', patient.id)
+    .eq('status', 'completed');
+
+  if (completedApptCount && completedApptCount > 0) {
+    throw new AppError(`Cannot delete patient with completed clinical appointment records.`, 400, 'LINKED_RECORDS');
+  }
+
+  // 3. Check for linked visits (clinical history)
+  const { count: visitCount } = await supabase
+    .from('visits')
+    .select('id', { count: 'exact', head: true })
+    .eq('patient_id', patient.id);
+
+  if (visitCount && visitCount > 0) {
+    throw new AppError(`Cannot delete patient with existing clinical visit records.`, 400, 'LINKED_RECORDS');
+  }
+
+  // 4. Check for linked billings/invoices (financial records)
+  const { count: billingCount } = await supabase
+    .from('billings')
+    .select('id', { count: 'exact', head: true })
+    .eq('patient_id', patient.id);
+
+  if (billingCount && billingCount > 0) {
+    throw new AppError(`Cannot delete patient with existing billing or invoice records.`, 400, 'LINKED_RECORDS');
+  }
+
+  // 5. Check for linked lab orders
+  const { count: labCount } = await supabase
+    .from('lab_orders')
+    .select('id', { count: 'exact', head: true })
+    .eq('patient_id', patient.id);
+
+  if (labCount && labCount > 0) {
+    throw new AppError(`Cannot delete patient with existing laboratory orders.`, 400, 'LINKED_RECORDS');
+  }
+
+  // 6. Check for IPD admissions (if local store has active or historical admissions for this patient)
+  try {
+    const storePath = path.resolve(process.cwd(), 'src/storage/ipd_store.json');
+    if (fs.existsSync(storePath)) {
+      const store = JSON.parse(fs.readFileSync(storePath, 'utf8') || '{}');
+      const hasIpd = (store.admissions || []).some(a => 
+        (a.patient_id === patient.id || a.patientId === patient.id)
+      );
+      if (hasIpd) {
+        throw new AppError(`Cannot delete patient with existing inpatient admission records.`, 400, 'LINKED_RECORDS');
+      }
+    }
+  } catch (ipdErr) {
+    if (ipdErr instanceof AppError) throw ipdErr;
+  }
 
   const { error } = await supabase.from('patients').delete().eq('id', patient.id);
   if (error) throw error;

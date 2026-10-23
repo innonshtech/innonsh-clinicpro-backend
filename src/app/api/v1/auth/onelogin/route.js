@@ -108,6 +108,7 @@ export const POST = withErrorHandler(async (req) => {
       type: ROLES.RECEPTIONIST,
       format: (u) => ({
         id: u.id,
+        _id: u.id,
         name: `${u.first_name} ${u.last_name}`,
         firstName: u.first_name,
         lastName: u.last_name,
@@ -115,6 +116,10 @@ export const POST = withErrorHandler(async (req) => {
         phone: u.phone,
         role: u.role === 'nurse' ? ROLES.NURSE : (u.role === 'housekeeping' ? ROLES.HOUSEKEEPING : (u.role || ROLES.RECEPTIONIST)),
         clinicId: u.clinic_id,
+        clinic_id: u.clinic_id,
+        wardId: u.ward_id || u.wardId || u.assigned_ward_id || null,
+        ward_id: u.ward_id || u.wardId || u.assigned_ward_id || null,
+        assigned_ward_id: u.ward_id || u.wardId || u.assigned_ward_id || null,
         status: u.status
       }),
       getClinicId: (u) => u.clinic_id,
@@ -263,7 +268,9 @@ export const POST = withErrorHandler(async (req) => {
           permissions: user.permissions || ROLE_DEFAULT_PERMISSIONS[user.role] || []
         }
       : user;
-    const effectiveRole = found.table === 'staff' && user.role === 'nurse' ? ROLES.NURSE : type;
+    const effectiveRole = found.table === 'staff'
+      ? (user.role === 'nurse' ? ROLES.NURSE : (user.role === 'housekeeping' ? ROLES.HOUSEKEEPING : type))
+      : type;
     const tokens = generateToken(userForToken, effectiveRole, clinicId);
 
     const { createSession } = await import('@/utils/sessionHelper');

@@ -1,5 +1,7 @@
 import { ApiResponse } from '@/utils/apiResponse';
 import { supabase } from '@/lib/supabase';
+import { withErrorHandler } from '@/utils/apiHandler';
+import { withRoles } from '@/utils/authGuard';
 import fs from 'fs';
 import path from 'path';
 
@@ -14,12 +16,16 @@ function getLocalStore() {
 }
 
 // GET: /api/v1/clinic/fetch-patients/[clinicId]
-export async function GET(req, { params }) {
-  try {
+export const GET = withErrorHandler(
+  withRoles(['clinic', 'admin', 'doctor', 'receptionist'], async (req, { params }) => {
     const { clinicId } = await params;
 
     if (!clinicId) {
       return ApiResponse.error('Clinic ID is required', 'MISSING_FIELD', [], 400);
+    }
+
+    if (req.user?.role === 'clinic' && req.user?.clinicId && String(req.user.clinicId) !== String(clinicId)) {
+      return ApiResponse.error('Forbidden: Cross-clinic access prohibited', 'CROSS_CLINIC_FORBIDDEN', [], 403);
     }
 
     let allPatients = [];
@@ -99,9 +105,5 @@ export async function GET(req, { params }) {
     });
 
     return ApiResponse.success({ patients: allPatients }, 'Patients fetched successfully');
-
-  } catch (error) {
-    console.error('Error fetching clinic patients:', error);
-    return ApiResponse.error('Server error', 'SERVER_ERROR', error.message, 500);
-  }
-}
+  })
+);

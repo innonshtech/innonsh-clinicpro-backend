@@ -1,25 +1,20 @@
 import { ApiResponse } from "@/utils/apiResponse";
 import { supabase } from "@/lib/supabase";
+import { withErrorHandler } from '@/utils/apiHandler';
+import { withRoles } from '@/utils/authGuard';
 import bcrypt from "bcryptjs";
 
 // POST: /api/v1/clinic/add-receptionist
-/**
- * @swagger
- * /api/v1/clinic/add-receptionist:
- *   post:
- *     summary: POST request for /api/v1/clinic/add-receptionist
- *     tags: [Clinic]
- *     responses:
- *       200:
- *         description: Successful response
- *       400:
- *         description: Bad Request
- *       500:
- *         description: Internal Server Error
- */
-export async function POST(req) {
-  try {
-    const data = await req.json();
+export const POST = withErrorHandler(
+  withRoles(['clinic', 'admin'], async (req) => {
+    let data;
+    try { data = await req.json(); } catch (_) {
+      return ApiResponse.error('Invalid JSON body', 'BAD_REQUEST', [], 400);
+    }
+
+    if (req.user?.role === 'clinic' && req.user?.clinicId && data.clinicId && String(req.user.clinicId) !== String(data.clinicId)) {
+      return ApiResponse.error('Forbidden: Cross-clinic access prohibited', 'CROSS_CLINIC_FORBIDDEN', [], 403);
+    }
 
     const phoneVal = data.phone || data.phoneNumber;
     if (phoneVal && !/^[0-9]{10}$/.test(String(phoneVal).trim())) {
@@ -40,7 +35,7 @@ export async function POST(req) {
       email: data.email,
       phone: data.phone || data.phoneNumber,
       password: hashedPassword,
-      clinic_id: data.clinicId,
+      clinic_id: data.clinicId || req.user?.clinicId,
       role: data.role || 'receptionist',
       status: data.status || 'active'
     };
@@ -51,7 +46,12 @@ export async function POST(req) {
       .select()
       .single();
 
-    if (error) throw error;
+    if (error) {
+      if (error.code === '23505') {
+        return ApiResponse.error("Email already exists", "DUPLICATE_ENTRY", [], 400);
+      }
+      throw error;
+    }
 
     // Remap for frontend
     const staffResponse = {
@@ -62,15 +62,8 @@ export async function POST(req) {
       clinicId: newStaffData.clinic_id
     };
     
-    // Remove password from response
     delete staffResponse.password;
 
     return ApiResponse.success({ staff: staffResponse }, "Staff created successfully", 201);
-  } catch (error) {
-    console.error("Staff creation error:", error);
-    if (error.code === '23505') {
-      return ApiResponse.error("Email already exists", "DUPLICATE_ENTRY", [], 400);
-    }
-    return ApiResponse.error("Internal Server Error", "SERVER_ERROR", error.message, 500);
-  }
-}
+  })
+);

@@ -38,7 +38,11 @@ export const generateToken = (user, role, clinicId = null) => {
     ...(effectiveLabId ? { labId: effectiveLabId } : {}),
     ...(user.labRole ? { labRole: user.labRole } : {}),
     ...(user.permissions ? { permissions: user.permissions } : {}),
-    ...(user.isStaff !== undefined ? { isStaff: user.isStaff } : {})
+    ...(user.isStaff !== undefined ? { isStaff: user.isStaff } : {}),
+    ...((user.ward_id || user.wardId || user.assigned_ward_id) ? {
+      wardId: user.ward_id || user.wardId || user.assigned_ward_id,
+      ward_id: user.ward_id || user.wardId || user.assigned_ward_id
+    } : {})
   };
 
   const accessToken = jwt.sign(payload, secret, { expiresIn: '15m' });

@@ -33,6 +33,13 @@ export const POST = withErrorHandler(
       return ApiResponse.error('Invalid JSON body', 'BAD_REQUEST', [], 400);
     }
 
+    // Early IPD module check
+    const targetClinicId = body.clinicId || (req.user?.role === 'clinic' ? req.user?.clinicId : null);
+    if (targetClinicId) {
+      const moduleBlock = await requireIpdModule(targetClinicId);
+      if (moduleBlock) return moduleBlock;
+    }
+
     // 1. Strict Email Validation (Pre-check for specific error code)
     const emailCheck = validateNurseEmail(body.email);
     if (!emailCheck.isValid) {

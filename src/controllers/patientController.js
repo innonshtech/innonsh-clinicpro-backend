@@ -174,6 +174,9 @@ export const deletePatient = async (req, { params }) => {
     if (error.message.includes('Access Denied')) {
       return ApiResponse.error(error.message, 'FORBIDDEN', [], 403);
     }
+    if (error.code === 'LINKED_RECORDS' || error.statusCode === 400) {
+      return ApiResponse.error(error.message, error.code || 'BAD_REQUEST', [], 400);
+    }
 
     console.error('Error in deletePatient controller:', error);
     throw error;
