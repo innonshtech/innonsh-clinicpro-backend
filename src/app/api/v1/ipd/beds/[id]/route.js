@@ -12,8 +12,8 @@ export const GET = withErrorHandler(
     const clinicId = searchParams.get('clinicId') || req.user?.clinicId;
     if (!clinicId) return ApiResponse.error('Clinic ID is required', 'MISSING_FIELD', [], 400);
 
-    if (req.user?.role === 'clinic' && req.user?.clinicId !== clinicId) {
-      return ApiResponse.error('Forbidden: Cross-clinic access prohibited', 'FORBIDDEN', [], 403);
+    if (req.user?.clinicId && clinicId && String(req.user.clinicId) !== String(clinicId)) {
+      return ApiResponse.error('Forbidden: Cross-clinic access prohibited', 'CROSS_CLINIC_FORBIDDEN', [], 403);
     }
 
     try {
@@ -26,7 +26,7 @@ export const GET = withErrorHandler(
 );
 
 export const PUT = withErrorHandler(
-  withRoles(['clinic', 'admin', 'doctor', 'housekeeping'], async (req, { params }) => {
+  withRoles(['clinic', 'admin', 'doctor', 'housekeeping', 'nurse'], async (req, { params }) => {
     const { id } = await params;
     if (!id) return ApiResponse.error('Bed ID is required', 'MISSING_FIELD', [], 400);
 

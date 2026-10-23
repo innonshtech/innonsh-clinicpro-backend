@@ -14,6 +14,14 @@ export const GET = withErrorHandler(
       clinicId: req.user?.clinicId || (req.user?.role === 'clinic' ? req.user?.id : null)
     };
 
+    if (user.clinicId) {
+      const { checkClinicModule } = await import('@/utils/moduleGuard');
+      const labCheck = await checkClinicModule(user.clinicId, 'lab');
+      if (!labCheck.enabled) {
+        return ApiResponse.error('Access Denied: The Lab module is not enabled for this clinic.', 'LAB_MODULE_DISABLED', [], 403);
+      }
+    }
+
     const { searchParams } = new URL(req.url);
     const search = searchParams.get('search') || '';
     const status = searchParams.get('status') || 'all';

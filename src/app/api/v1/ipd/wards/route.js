@@ -12,8 +12,12 @@ export const GET = withErrorHandler(
       return ApiResponse.error('Clinic ID is required', 'MISSING_FIELD', [], 400);
     }
 
+    if (req.user?.clinicId && clinicId && String(req.user.clinicId) !== String(clinicId)) {
+      return ApiResponse.error('Forbidden: Cross-clinic access prohibited', 'CROSS_CLINIC_FORBIDDEN', [], 403);
+    }
+
     try {
-      const wards = await ipdService.getWards(clinicId);
+      const wards = await ipdService.getWards(clinicId, req.user);
       return ApiResponse.success({ wards }, 'Wards fetched successfully');
     } catch (err) {
       return ApiResponse.error(err.message, err.code || 'ERROR', [], err.statusCode || 400);

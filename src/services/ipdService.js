@@ -99,9 +99,10 @@ export function calculateFluidTotals(entries, targetDateStr) {
   return summary;
 }
 
-import { evaluateVitals } from '@/utils/vitalsEvaluation';
+import { evaluateVitals, STATUS } from '@/utils/vitalsEvaluation';
 import { calculateVitalFlags } from '@/validations/userValidation';
 import { supabase } from '@/lib/supabase';
+import * as auditService from '@/services/auditService';
 import { checkClinicModule } from '@/utils/moduleGuard';
 import fs from 'fs';
 import path from 'path';
@@ -109,6 +110,51 @@ import path from 'path';
 // Fallback persistence file in backend storage if Supabase table is not yet migrated in PostgreSQL
 const STORAGE_FILE = path.resolve(process.cwd(), 'src/storage/ipd_store.json');
 const bedAllocationLocks = new Set();
+
+export function parseScheduleTimes(frequency, schedule) {
+  if (Array.isArray(schedule) && schedule.length > 0) {
+    return schedule.map(s => String(s).trim()).filter(Boolean);
+  }
+  if (typeof schedule === 'string' && schedule.trim()) {
+    try {
+      const parsed = JSON.parse(schedule);
+      if (Array.isArray(parsed)) return parsed.map(s => String(s).trim()).filter(Boolean);
+    } catch (_) {
+      const parts = schedule.split(',').map(s => s.trim()).filter(Boolean);
+      if (parts.length > 0) return parts;
+    }
+  }
+
+  const freq = (frequency || '').toUpperCase().trim();
+  if (freq === 'OD' || freq === 'ONCE DAILY' || freq === '1-0-0' || freq === '0-1-0' || freq === '0-0-1') {
+    return ['09:00'];
+  }
+  if (freq === 'BD' || freq === 'BID' || freq === 'TWICE DAILY' || freq === '1-0-1' || freq === '1-1-0' || freq === '0-1-1') {
+    return ['09:00', '21:00'];
+  }
+  if (freq === 'TDS' || freq === 'TID' || freq === 'THRICE DAILY' || freq === '1-1-1') {
+    return ['08:00', '14:00', '20:00'];
+  }
+  if (freq === 'QID' || freq === 'FOUR TIMES DAILY') {
+    return ['06:00', '12:00', '18:00', '22:00'];
+  }
+  if (freq === 'Q4H') {
+    return ['02:00', '06:00', '10:00', '14:00', '18:00', '22:00'];
+  }
+  if (freq === 'Q6H') {
+    return ['06:00', '12:00', '18:00', '00:00'];
+  }
+  if (freq === 'Q8H') {
+    return ['06:00', '14:00', '22:00'];
+  }
+  if (freq === 'STAT') {
+    return ['STAT'];
+  }
+  if (freq === 'PRN') {
+    return ['PRN'];
+  }
+  return ['09:00'];
+}
 
 function getLocalStore() {
   try {
@@ -128,7 +174,10 @@ function getLocalStore() {
         bedHistory: []
       }, null, 2), 'utf8');
     }
-    return JSON.parse(fs.readFileSync(STORAGE_FILE, 'utf8'));
+    const parsedStore = JSON.parse(fs.readFileSync(STORAGE_FILE, 'utf8'));
+    if (!parsedStore.prescriptions) parsedStore.prescriptions = [];
+    if (!parsedStore.marRecords) parsedStore.marRecords = [];
+    return parsedStore;
   } catch (e) {
     return {
       buildings: [],
@@ -718,8 +767,14 @@ export const ipdService = {
     return item;
   },
 
-  async getWards(clinicId) {
+  async getWards(clinicId, user = null) {
     await this.verifyClinicIpd(clinicId);
+    if (user && user.clinicId && String(user.clinicId) !== String(clinicId)) {
+      const err = new Error('Forbidden: Cross-clinic access prohibited.');
+      err.code = 'CROSS_CLINIC_FORBIDDEN';
+      err.statusCode = 403;
+      throw err;
+    }
     try {
       const { data, error } = await supabase.from('wards').select('*').eq('clinic_id', clinicId).order('name');
       if (!error && data) return data;
@@ -729,8 +784,14 @@ export const ipdService = {
     return store.wards.filter(w => w.clinic_id === clinicId);
   },
 
-  async getAvailableBeds(clinicId, wardId = null) {
+  async getAvailableBeds(clinicId, wardId = null, user = null) {
     await this.verifyClinicIpd(clinicId);
+    if (user && user.clinicId && String(user.clinicId) !== String(clinicId)) {
+      const err = new Error('Forbidden: Cross-clinic access prohibited.');
+      err.code = 'CROSS_CLINIC_FORBIDDEN';
+      err.statusCode = 403;
+      throw err;
+    }
     try {
       let query = supabase.from('beds').select('*, rooms(room_number), wards(name)').eq('clinic_id', clinicId).eq('status', 'AVAILABLE');
       if (wardId) query = query.eq('ward_id', wardId);
@@ -835,6 +896,13 @@ export const ipdService = {
   // 9. Bed Status Updates (All 7 required statuses, transition enforcement, audit trail)
   async updateBedStatus(clinicId, user, bedId, payload) {
     await this.verifyClinicIpd(clinicId);
+    if (user && user.clinicId && String(user.clinicId) !== String(clinicId)) {
+      const err = new Error('Forbidden: Cross-clinic access prohibited.');
+      err.code = 'CROSS_CLINIC_FORBIDDEN';
+      err.statusCode = 403;
+      throw err;
+    }
+
     const newStatus = payload.status;
     const reason = payload.reason?.trim() || ('Status updated to ' + newStatus);
 
@@ -859,6 +927,78 @@ export const ipdService = {
       err.code = 'BED_NOT_FOUND';
       err.statusCode = 404;
       throw err;
+    }
+
+    if (user && user.role === 'nurse') {
+      const nurseId = user.id || user._id;
+      let nurse = (store.staff || []).find(s => (s.id === nurseId || s._id === nurseId) && s.clinic_id === clinicId);
+      if (!nurse) {
+        try {
+          const { data: dbNurse } = await supabase.from('staff').select('*').eq('id', nurseId).eq('clinic_id', clinicId).maybeSingle();
+          if (dbNurse) nurse = dbNurse;
+        } catch (_) {}
+      }
+      if (!nurse) {
+        const otherNurse = (store.staff || []).find(s => s.id === nurseId || s._id === nurseId);
+        if (otherNurse && otherNurse.clinic_id !== clinicId) {
+          const err = new Error('Forbidden: Nurse belongs to a different clinic.');
+          err.code = 'CROSS_CLINIC_FORBIDDEN';
+          err.statusCode = 403;
+          throw err;
+        }
+      }
+      if (nurse && nurse.status !== 'active') {
+        const err = new Error('Forbidden: Inactive nurse cannot perform bed management.');
+        err.code = 'NURSE_INACTIVE';
+        err.statusCode = 403;
+        throw err;
+      }
+
+      const nurseWardId = nurse?.ward_id || nurse?.wardId || nurse?.assigned_ward_id || nurse?.assignedWardId;
+      if (!nurseWardId) {
+        const err = new Error('Forbidden: Nurse has no assigned ward configured.');
+        err.code = 'FORBIDDEN_NO_WARD';
+        err.statusCode = 403;
+        throw err;
+      }
+
+      // Resolve bed ward: Bed -> Room -> Ward
+      let bedWardId = bed.ward_id || bed.wardId;
+      if (!bedWardId && (bed.room_id || bed.roomId)) {
+        const roomId = bed.room_id || bed.roomId;
+        const room = (store.rooms || []).find(r => r.id === roomId || r._id === roomId);
+        if (room) {
+          bedWardId = room.ward_id || room.wardId;
+        } else {
+          try {
+            const { data: dbRoom } = await supabase.from('rooms').select('ward_id').eq('id', roomId).maybeSingle();
+            if (dbRoom) bedWardId = dbRoom.ward_id || dbRoom.wardId;
+          } catch (_) {}
+        }
+      }
+
+      if (!bedWardId || String(bedWardId) !== String(nurseWardId)) {
+        const err = new Error('Forbidden: Nurse can only manage beds in their assigned ward.');
+        err.code = 'FORBIDDEN_WARD_MISMATCH';
+        err.statusCode = 403;
+        throw err;
+      }
+
+      // HR-authorized transitions: RESERVED, MAINTENANCE, BLOCKED, ISOLATION, AVAILABLE
+      const NURSE_AUTHORIZED_TARGETS = ['RESERVED', 'MAINTENANCE', 'BLOCKED', 'ISOLATION', 'AVAILABLE'];
+      if (!NURSE_AUTHORIZED_TARGETS.includes(newStatus)) {
+        const err = new Error(`Forbidden: Nurse role is not authorized to transition bed to ${newStatus}.`);
+        err.code = 'FORBIDDEN_TRANSITION';
+        err.statusCode = 403;
+        throw err;
+      }
+
+      if (bed.status === 'CLEANING' && newStatus === 'AVAILABLE') {
+        const err = new Error('CLEANING beds must be transitioned to AVAILABLE through the mark-cleaned endpoint.');
+        err.code = 'INVALID_CLEANING_ENDPOINT';
+        err.statusCode = 400;
+        throw err;
+      }
     }
 
     const prevStatus = bed.status;
@@ -946,6 +1086,69 @@ export const ipdService = {
       err.code = 'BED_NOT_FOUND';
       err.statusCode = 404;
       throw err;
+    }
+
+    if (user && user.clinicId && String(user.clinicId) !== String(clinicId)) {
+      const err = new Error('Forbidden: Cross-clinic access prohibited.');
+      err.code = 'CROSS_CLINIC_FORBIDDEN';
+      err.statusCode = 403;
+      throw err;
+    }
+
+    if (user && user.role === 'nurse') {
+      const nurseId = user.id || user._id;
+      let nurse = (store.staff || []).find(s => (s.id === nurseId || s._id === nurseId) && s.clinic_id === clinicId);
+      if (!nurse) {
+        try {
+          const { data: dbNurse } = await supabase.from('staff').select('*').eq('id', nurseId).eq('clinic_id', clinicId).maybeSingle();
+          if (dbNurse) nurse = dbNurse;
+        } catch (_) {}
+      }
+      if (!nurse) {
+        const otherNurse = (store.staff || []).find(s => s.id === nurseId || s._id === nurseId);
+        if (otherNurse && otherNurse.clinic_id !== clinicId) {
+          const err = new Error('Forbidden: Nurse belongs to a different clinic.');
+          err.code = 'CROSS_CLINIC_FORBIDDEN';
+          err.statusCode = 403;
+          throw err;
+        }
+      }
+      if (nurse && nurse.status !== 'active') {
+        const err = new Error('Forbidden: Inactive nurse cannot perform bed cleaning verification.');
+        err.code = 'NURSE_INACTIVE';
+        err.statusCode = 403;
+        throw err;
+      }
+
+      const nurseWardId = nurse?.ward_id || nurse?.wardId || nurse?.assigned_ward_id || nurse?.assignedWardId;
+      if (!nurseWardId) {
+        const err = new Error('Forbidden: Nurse has no assigned ward configured.');
+        err.code = 'FORBIDDEN_NO_WARD';
+        err.statusCode = 403;
+        throw err;
+      }
+
+      // Resolve bed ward: Bed -> Room -> Ward
+      let bedWardId = bed.ward_id || bed.wardId;
+      if (!bedWardId && (bed.room_id || bed.roomId)) {
+        const roomId = bed.room_id || bed.roomId;
+        const room = (store.rooms || []).find(r => r.id === roomId || r._id === roomId);
+        if (room) {
+          bedWardId = room.ward_id || room.wardId;
+        } else {
+          try {
+            const { data: dbRoom } = await supabase.from('rooms').select('ward_id').eq('id', roomId).maybeSingle();
+            if (dbRoom) bedWardId = dbRoom.ward_id || dbRoom.wardId;
+          } catch (_) {}
+        }
+      }
+
+      if (!bedWardId || String(bedWardId) !== String(nurseWardId)) {
+        const err = new Error('Forbidden: Nurse can only manage beds in their assigned ward.');
+        err.code = 'FORBIDDEN_WARD_MISMATCH';
+        err.statusCode = 403;
+        throw err;
+      }
     }
 
     if (bed.status !== 'CLEANING') {
@@ -1556,16 +1759,21 @@ export const ipdService = {
     const baseList = dbAdms.length > 0 ? dbAdms : localAdms;
     const enrichedAdmissions = baseList.map(adm => {
       const p = (store.patients || []).find(pt => pt.id === adm.patient_id || pt._id === adm.patient_id);
-      const w = (store.wards || []).find(wd => wd.id === adm.ward_id);
-      const b = (store.beds || []).find(bd => bd.id === adm.bed_id);
-      const n = (store.staff || []).find(st => st.id === adm.assigned_nurse_id);
+      const w = (store.wards || []).find(wd => wd.id === (adm.ward_id || adm.wardId));
+      const b = (store.beds || []).find(bd => bd.id === (adm.bed_id || adm.bedId));
+      const r = (store.rooms || []).find(rm => rm.id === (b?.room_id || adm.room_id || adm.roomId));
+      const fl = (store.floors || []).find(f => f.id === (w?.floor_id || adm.floor_id || adm.floorId));
+      const bg = (store.buildings || []).find(bgItem => bgItem.id === (fl?.building_id || w?.building_id || adm.building_id || adm.buildingId));
+      const n = (store.staff || []).find(st => st.id === (adm.assigned_nurse_id || adm.assignedNurseId));
       const d = (store.doctors || []).find(dc => dc.id === adm.admitting_doctor_id) || clinicDoctorsList.find(dc => dc.id === adm.admitting_doctor_id);
 
       const patientName = adm.patient_name || adm.patientName || (p ? `${p.first_name || p.firstName || ''} ${p.last_name || p.lastName || ''}`.trim() : 'Patient');
       const wardName = adm.ward_name || adm.wardName || (w ? w.name : 'Ward');
       const bedNumber = adm.bed_number || adm.bedNumber || (b ? b.bed_number : '');
-      const roomNumber = adm.room_number || adm.roomNumber || (b ? (b.room_number || b.roomNumber) : '');
-      const nurseName = adm.nurse_name || adm.nurseName || (n ? `${n.first_name || ''} ${n.last_name || ''}`.trim() : 'Assigned Nurse');
+      const roomNumber = adm.room_number || adm.roomNumber || (r ? (r.room_number || r.roomNumber) : (b ? (b.room_number || b.roomNumber) : ''));
+      const buildingName = adm.building_name || adm.buildingName || (bg ? bg.name : '');
+      const floorNumber = adm.floor_number || adm.floorNumber || (fl ? (fl.floor_number || fl.name) : '');
+      const nurseName = adm.nurse_name || adm.nurseName || (n ? `${n.first_name || ''} ${n.last_name || ''}`.trim() : (adm.assigned_nurse_id ? 'Assigned Nurse' : 'Unassigned'));
       let doctorName = (adm.admitting_doctor_name && adm.admitting_doctor_name !== 'Doctor') ? adm.admitting_doctor_name :
         (adm.admittingDoctorName && adm.admittingDoctorName !== 'Doctor') ? adm.admittingDoctorName : null;
       if (!doctorName && d) {
@@ -1590,15 +1798,42 @@ export const ipdService = {
         room_number: roomNumber,
         nurseName,
         nurse_name: nurseName,
+        assignedNurseName: nurseName,
+        assigned_nurse_name: nurseName,
+        buildingName,
+        building_name: buildingName,
+        floorNumber,
+        floor_number: floorNumber,
         admittingDoctorName: doctorName,
-        admitting_doctor_name: doctorName
+        admitting_doctor_name: doctorName,
+        patient: p || adm.patient,
+        patient_age: p?.age ?? adm.patient_age ?? adm.patientAge,
+        patientAge: p?.age ?? adm.patient_age ?? adm.patientAge,
+        date_of_birth: p?.date_of_birth ?? p?.dateOfBirth ?? adm.date_of_birth ?? adm.dateOfBirth,
+        dateOfBirth: p?.date_of_birth ?? p?.dateOfBirth ?? adm.date_of_birth ?? adm.dateOfBirth
       };
     });
 
     let finalResult = enrichedAdmissions;
     if (user && user.role === 'nurse') {
       const nurseId = user.id || user._id;
+      let nurse = (store.staff || []).find(s => (s.id === nurseId || s._id === nurseId) && s.clinic_id === clinicId);
+      if (!nurse) {
+        try {
+          const { data: dbNurse } = await supabase.from('staff').select('*').eq('id', nurseId).eq('clinic_id', clinicId).maybeSingle();
+          if (dbNurse) nurse = dbNurse;
+        } catch (_) {}
+      }
+      const nurseWardId = nurse?.ward_id || nurse?.wardId || nurse?.assigned_ward_id;
+
       finalResult = finalResult.filter(adm => {
+        if (nurseWardId) {
+          const admWardId = adm.ward_id || adm.wardId;
+          if (!admWardId || String(admWardId) !== String(nurseWardId)) {
+            return false;
+          }
+        }
+
         const isAssigned = (adm.assigned_nurse_id === nurseId || adm.assignedNurseId === nurseId ||
           (store.nurseAssignments || []).some(na => (na.admission_id === adm.id || na.admissionId === adm.id) && (na.nurse_id === nurseId || na.nurseId === nurseId) && na.is_active !== false));
         if (!isAssigned) return false;
@@ -1606,6 +1841,17 @@ export const ipdService = {
           return (adm.status || '').toLowerCase() === 'admitted';
         }
         return true;
+      });
+    }
+
+    if (finalResult && Array.isArray(finalResult)) {
+      finalResult = finalResult.map(adm => {
+        const pendingTransfer = (store.transfers || []).find(t => (t.admission_id === adm.id || t.admissionId === adm.id) && t.status === 'APPROVED') || null;
+        return {
+          ...adm,
+          pendingTransfer,
+          pendingTransferId: pendingTransfer ? pendingTransfer.id : null
+        };
       });
     }
 
@@ -1659,9 +1905,13 @@ export const ipdService = {
 
     if (user && user.role === 'nurse') {
       const nurseId = user.id || user._id;
-      const isAssigned = (admission.assigned_nurse_id === nurseId || admission.assignedNurseId === nurseId ||
-        (store.nurseAssignments || []).some(na => (na.admission_id === admission.id || na.admissionId === admission.id) && (na.nurse_id === nurseId || na.nurseId === nurseId)));
-      if (!isAssigned) {
+      const isAssigned = (admission.assigned_nurse_id === nurseId || admission.assignedNurseId === nurseId);
+      const hasActiveAssignment = (store.nurseAssignments || []).some(
+        na => (na.admission_id === admission.id || na.admissionId === admission.id) &&
+              (na.nurse_id === nurseId || na.nurseId === nurseId) &&
+              na.is_active !== false
+      );
+      if (!isAssigned && !hasActiveAssignment) {
         const err = new Error('Forbidden: Nurse is not assigned to this patient.');
         err.code = 'FORBIDDEN_NURSE_UNASSIGNED';
         err.statusCode = 403;
@@ -1678,13 +1928,19 @@ export const ipdService = {
     const docId = admission.admitting_doctor_id || admission.admittingDoctorId || admission.doctor_id || admission.doctorId;
     const nName = admission.nurse_name || admission.nurseName || (admission.nurse?.name) || 'Assigned Nurse';
 
+    const activeTransfer = (store.transfers || []).find(t => (t.admission_id === admission.id || t.admissionId === admission.id) && t.status === 'APPROVED') || null;
+    const transferHistory = (store.transfers || []).filter(t => (t.admission_id === admission.id || t.admissionId === admission.id));
+
     return {
       ...admission,
       doctorName: docName,
       doctor_id: docId,
       doctor: admission.doctor || { id: docId, name: docName },
       nurseName: nName,
-      patientAdmissions
+      patientAdmissions,
+      pendingTransfer: activeTransfer,
+      pendingTransferId: activeTransfer ? activeTransfer.id : null,
+      transferHistory
     };
   },
 
@@ -2216,6 +2472,12 @@ export const ipdService = {
       // 14. Inpatient Discharge Flow: OCCUPIED -> CLEANING (Never directly to AVAILABLE)
   async dischargePatient(clinicId, user, admissionId, payload = {}) {
     await this.verifyClinicIpd(clinicId);
+    if (user && user.clinicId && String(user.clinicId) !== String(clinicId)) {
+      const err = new Error('Forbidden: Cross-clinic access prohibited.');
+      err.code = 'CROSS_CLINIC_FORBIDDEN';
+      err.statusCode = 403;
+      throw err;
+    }
     const store = getLocalStore();
 
     let admission = store.admissions?.find(a => a.id === admissionId && a.clinic_id === clinicId);
@@ -2573,7 +2835,22 @@ export const ipdService = {
 
     if (user && user.role === 'nurse') {
       const nurseId = user.id || user._id;
-      const nurse = (store.staff || []).find(s => s.id === nurseId || s._id === nurseId);
+      let nurse = (store.staff || []).find(s => (s.id === nurseId || s._id === nurseId) && s.clinic_id === clinicId);
+      if (!nurse) {
+        try {
+          const { data: dbNurse } = await supabase.from('staff').select('*').eq('id', nurseId).eq('clinic_id', clinicId).maybeSingle();
+          if (dbNurse) nurse = dbNurse;
+        } catch (_) {}
+      }
+      if (!nurse) {
+        const otherNurse = (store.staff || []).find(s => s.id === nurseId || s._id === nurseId);
+        if (otherNurse && otherNurse.clinic_id !== clinicId) {
+          const err = new Error('Forbidden: Nurse belongs to a different clinic.');
+          err.code = 'CROSS_CLINIC_FORBIDDEN';
+          err.statusCode = 403;
+          throw err;
+        }
+      }
       if (nurse && nurse.status !== 'active') {
         const err = new Error('Forbidden: Inactive nurse cannot access clinical notes.');
         err.code = 'NURSE_INACTIVE';
@@ -2595,6 +2872,22 @@ export const ipdService = {
       err.code = 'ADMISSION_NOT_FOUND';
       err.statusCode = 404;
       throw err;
+    }
+
+    if (user && user.role === 'nurse') {
+      const nurseId = user.id || user._id;
+      const isAssigned = (admission.assigned_nurse_id === nurseId || admission.assignedNurseId === nurseId);
+      const hasActiveAssignment = (store.nurseAssignments || []).some(
+        na => (na.admission_id === admissionId || na.admissionId === admissionId) &&
+              (na.nurse_id === nurseId || na.nurseId === nurseId) &&
+              na.is_active !== false
+      );
+      if (!isAssigned && !hasActiveAssignment) {
+        const err = new Error('Forbidden: Nurse is not assigned to this inpatient admission.');
+        err.code = 'FORBIDDEN_NURSE_UNASSIGNED';
+        err.statusCode = 403;
+        throw err;
+      }
     }
 
     const notes = (store.clinicalNotes || [])
@@ -3264,6 +3557,16 @@ export const ipdService = {
     const patientId = admission.patient_id || admission.patientId || (admission.patient?.id);
     let patient = (store.patients || []).find(p => p.id === patientId || p._id === patientId);
     if (!patient && admission.patient) patient = admission.patient;
+    if (!patient && patientId) {
+      try {
+        const { data: dbPat } = await supabase.from('patients').select('*').eq('id', patientId).maybeSingle();
+        if (dbPat) {
+          patient = dbPat;
+          if (!store.patients) store.patients = [];
+          if (!store.patients.some(pt => pt.id === dbPat.id)) store.patients.push(dbPat);
+        }
+      } catch (_) {}
+    }
 
     if (patient) {
       if (patient.age !== undefined && patient.age !== null) {
@@ -3271,6 +3574,15 @@ export const ipdService = {
         patientContext.isAdult = patientContext.age >= 18;
       } else if (patient.date_of_birth || patient.dateOfBirth) {
         patientContext.dateOfBirth = patient.date_of_birth || patient.dateOfBirth;
+        const dob = new Date(patientContext.dateOfBirth);
+        if (!isNaN(dob.getTime())) {
+          const ageDiff = Date.now() - dob.getTime();
+          const calculatedAge = Math.abs(new Date(ageDiff).getUTCFullYear() - 1970);
+          patientContext.age = calculatedAge;
+          patientContext.isAdult = calculatedAge >= 18;
+        }
+      } else if (patient.isAdult === true) {
+        patientContext.isAdult = true;
       }
     }
 
@@ -3403,6 +3715,51 @@ export const ipdService = {
       .filter(v => (v.admission_id === admissionId || v.admissionId === admissionId) &&
                    (v.clinic_id === clinicId || v.clinicId === clinicId))
       .sort((a, b) => new Date(b.recorded_at || b.created_at) - new Date(a.recorded_at || a.created_at));
+
+    // Ensure evaluations are up-to-date if patient context is now resolved
+    let patient = (store.patients || []).find(p => p.id === admission.patient_id || p._id === admission.patient_id);
+    if (!patient && admission.patient) patient = admission.patient;
+    if (!patient && admission.patient_id) {
+      try {
+        const { data: dbPat } = await supabase.from('patients').select('*').eq('id', admission.patient_id).maybeSingle();
+        if (dbPat) {
+          patient = dbPat;
+          if (!store.patients) store.patients = [];
+          if (!store.patients.some(pt => pt.id === dbPat.id)) store.patients.push(dbPat);
+        }
+      } catch (_) {}
+    }
+    const patContext = { isAdult: false };
+    if (patient) {
+      if (patient.age !== undefined && patient.age !== null) {
+        patContext.age = Number(patient.age);
+        patContext.isAdult = patContext.age >= 18;
+      } else if (patient.date_of_birth || patient.dateOfBirth) {
+        patContext.dateOfBirth = patient.date_of_birth || patient.dateOfBirth;
+        const dob = new Date(patContext.dateOfBirth);
+        if (!isNaN(dob.getTime())) {
+          const ageDiff = Date.now() - dob.getTime();
+          const calculatedAge = Math.abs(new Date(ageDiff).getUTCFullYear() - 1970);
+          patContext.age = calculatedAge;
+          patContext.isAdult = calculatedAge >= 18;
+        }
+      } else if (patient.isAdult === true) {
+        patContext.isAdult = true;
+      }
+    }
+
+    if (patContext.isAdult || patContext.age !== undefined) {
+      for (const v of vitals) {
+        const hasEvaluations = v.evaluations && Object.keys(v.evaluations).length > 0;
+        const allUnconfigured = hasEvaluations && Object.values(v.evaluations).every(e => e?.status === STATUS.NOT_CONFIGURED);
+        if (!hasEvaluations || allUnconfigured) {
+          const reEval = evaluateVitals(v.values || {}, patContext);
+          v.evaluations = reEval.evaluations;
+          v.has_critical = reEval.has_critical;
+          v.has_abnormal = reEval.has_abnormal;
+        }
+      }
+    }
 
     return vitals;
   },
@@ -4083,6 +4440,2459 @@ export const ipdService = {
 
     const latestObs = vitals.length > 0 ? vitals[0] : null;
     return this.calculateVitalsSchedule(admission, latestObs);
+  },
+
+
+  // 15. PATIENT TRANSFER WORKFLOW (Doctor Initiates & Approves, Nurse Executes)
+
+  async initiatePatientTransfer(clinicId, user, admissionId, data = {}) {
+    await this.verifyClinicIpd(clinicId);
+    if (!user || (user.role !== 'doctor' && user.role !== 'clinic' && user.role !== 'admin')) {
+      const err = new Error('Forbidden: Only authorized doctors can initiate patient transfers.');
+      err.code = 'DOCTOR_ONLY';
+      err.statusCode = 403;
+      throw err;
+    }
+
+    if (!data.destinationWardId) {
+      const err = new Error('Destination ward is required for patient transfer.');
+      err.code = 'DESTINATION_WARD_REQUIRED';
+      err.statusCode = 400;
+      throw err;
+    }
+
+    if (!data.destinationBedId) {
+      const err = new Error('Destination bed is required for patient transfer.');
+      err.code = 'DESTINATION_BED_REQUIRED';
+      err.statusCode = 400;
+      throw err;
+    }
+
+    // Atomic in-process allocation guard on destination bed
+    if (bedAllocationLocks.has(data.destinationBedId)) {
+      const err = new Error('Destination bed is currently locked by another operation. Please retry.');
+      err.code = 'CONCURRENT_ALLOCATION_CONFLICT';
+      err.statusCode = 409;
+      throw err;
+    }
+
+    bedAllocationLocks.add(data.destinationBedId);
+
+    try {
+      const store = getLocalStore();
+
+      // 1. Admission Validation
+      let admission = (store.admissions || []).find(a => (a.id === admissionId || a._id === admissionId) && a.clinic_id === clinicId);
+      if (!admission) {
+        try {
+          const { data: dbAdm } = await supabase.from('ipd_admissions').select('*').eq('id', admissionId).eq('clinic_id', clinicId).maybeSingle();
+          if (dbAdm) admission = dbAdm;
+        } catch (_) {}
+      }
+
+      if (!admission) {
+        const err = new Error('Active inpatient admission not found.');
+        err.code = 'ADMISSION_NOT_FOUND';
+        err.statusCode = 404;
+        throw err;
+      }
+
+      if ((admission.status || '').toLowerCase() !== 'admitted') {
+        const err = new Error(`Cannot transfer patient with status: ${admission.status}. Only actively admitted inpatients can be transferred.`);
+        err.code = 'ADMISSION_NOT_ACTIVE';
+        err.statusCode = 400;
+        throw err;
+      }
+
+      // Check for existing pending transfer for this admission
+      const existingPending = (store.transfers || []).find(t =>
+        (t.admission_id === admissionId || t.admissionId === admissionId) &&
+        t.status === 'APPROVED'
+      );
+      if (existingPending) {
+        const err = new Error('A patient transfer has already been initiated and is awaiting nurse execution.');
+        err.code = 'TRANSFER_ALREADY_PENDING';
+        err.statusCode = 409;
+        throw err;
+      }
+
+      // 2. Validate Destination Ward
+      let destWard = (store.wards || []).find(w => w.id === data.destinationWardId && w.clinic_id === clinicId);
+      if (!destWard) {
+        try {
+          const { data: dbWard } = await supabase.from('wards').select('*').eq('id', data.destinationWardId).eq('clinic_id', clinicId).maybeSingle();
+          if (dbWard) destWard = dbWard;
+        } catch (_) {}
+      }
+
+      if (!destWard) {
+        const err = new Error('Destination ward not found in this clinic.');
+        err.code = 'DESTINATION_WARD_NOT_FOUND';
+        err.statusCode = 404;
+        throw err;
+      }
+
+      if (destWard.is_active === false) {
+        const err = new Error('Cannot transfer patient to an inactive ward.');
+        err.code = 'DESTINATION_WARD_INACTIVE';
+        err.statusCode = 400;
+        throw err;
+      }
+
+      // 3. Validate Destination Bed
+      let destBed = (store.beds || []).find(b => b.id === data.destinationBedId && b.clinic_id === clinicId);
+      if (!destBed) {
+        try {
+          const { data: dbBed } = await supabase.from('beds').select('*').eq('id', data.destinationBedId).eq('clinic_id', clinicId).maybeSingle();
+          if (dbBed) destBed = dbBed;
+        } catch (_) {}
+      }
+
+      if (!destBed) {
+        const err = new Error('Destination bed not found in this clinic.');
+        err.code = 'DESTINATION_BED_NOT_FOUND';
+        err.statusCode = 404;
+        throw err;
+      }
+
+      if (destBed.is_active === false) {
+        const err = new Error('Cannot transfer patient to an inactive bed.');
+        err.code = 'DESTINATION_BED_INACTIVE';
+        err.statusCode = 400;
+        throw err;
+      }
+
+      const destBedWardId = destBed.ward_id || destBed.wardId;
+      if (String(destBedWardId) !== String(data.destinationWardId)) {
+        const err = new Error('Destination bed does not belong to the selected destination ward.');
+        err.code = 'BED_WARD_MISMATCH';
+        err.statusCode = 400;
+        throw err;
+      }
+
+      const currentBedId = admission.bed_id || admission.bedId;
+      if (String(destBed.id) === String(currentBedId)) {
+        const err = new Error('Patient is already assigned to this bed. Destination bed must be different from current bed.');
+        err.code = 'CANNOT_TRANSFER_TO_SAME_BED';
+        err.statusCode = 400;
+        throw err;
+      }
+
+      // Destination bed must be AVAILABLE
+      if (destBed.status !== 'AVAILABLE') {
+        const err = new Error(`Destination bed is not available for transfer (current status: ${destBed.status}). Only active AVAILABLE beds can be allocated.`);
+        err.code = 'BED_NOT_AVAILABLE';
+        err.statusCode = 400;
+        throw err;
+      }
+
+      // Check if destination bed is currently occupied by another active admission
+      const isBedOccupiedByOther = (store.admissions || []).some(a =>
+        a.clinic_id === clinicId &&
+        (a.bed_id === destBed.id || a.bedId === destBed.id) &&
+        (a.status || '').toLowerCase() === 'admitted'
+      );
+      if (isBedOccupiedByOther) {
+        const err = new Error('Destination bed is already occupied by an active inpatient.');
+        err.code = 'BED_ALREADY_OCCUPIED';
+        err.statusCode = 409;
+        throw err;
+      }
+
+      // Check if destination bed is already reserved for another pending transfer
+      const isBedReservedForTransfer = (store.transfers || []).some(t =>
+        t.clinic_id === clinicId &&
+        (t.destination_bed_id === destBed.id || t.destinationBedId === destBed.id) &&
+        t.status === 'APPROVED'
+      );
+      if (isBedReservedForTransfer) {
+        const err = new Error('Destination bed is already reserved for another pending patient transfer.');
+        err.code = 'BED_RESERVED_FOR_TRANSFER';
+        err.statusCode = 409;
+        throw err;
+      }
+
+      // 4. Reserve Destination Bed for Transfer
+      const prevDestStatus = destBed.status || 'AVAILABLE';
+      destBed.status = 'RESERVED';
+      try {
+        await supabase.from('beds').update({ status: 'RESERVED' }).eq('id', destBed.id).eq('clinic_id', clinicId);
+      } catch (_) {}
+
+      const sourceWardName = admission.ward_name || admission.wardName || 'Current Ward';
+      const sourceBedNumber = admission.bed_number || admission.bedNumber || 'Current Bed';
+
+      await recordBedStatusHistory(
+        clinicId,
+        destBed.id,
+        prevDestStatus,
+        'RESERVED',
+        user,
+        `Reserved for patient transfer from ${sourceWardName} Bed ${sourceBedNumber}`,
+        admissionId,
+        store
+      );
+
+      // 5. Create Transfer Record
+      const transferId = generateUUID();
+      const nowIso = new Date().toISOString();
+      const doctorName = user.name || (user.first_name ? `Dr. ${user.first_name} ${user.last_name || ''}`.trim() : 'Doctor');
+      const patientName = admission.patient_name || admission.patientName || 'Inpatient';
+      const patientId = admission.patient_id || admission.patientId;
+
+      const transfer = {
+        id: transferId,
+        clinic_id: clinicId,
+        clinicId,
+        admission_id: admissionId,
+        admissionId,
+        admission_number: admission.admission_number || admission.admissionNumber || '',
+        admissionNumber: admission.admission_number || admission.admissionNumber || '',
+        patient_id: patientId,
+        patientId,
+        patient_name: patientName,
+        patientName,
+        source_ward_id: admission.ward_id || admission.wardId,
+        sourceWardId: admission.ward_id || admission.wardId,
+        source_ward_name: sourceWardName,
+        sourceWardName,
+        source_bed_id: currentBedId,
+        sourceBedId: currentBedId,
+        source_bed_number: sourceBedNumber,
+        sourceBedNumber,
+        destination_ward_id: destWard.id,
+        destinationWardId: destWard.id,
+        destination_ward_name: destWard.name,
+        destinationWardName: destWard.name,
+        destination_bed_id: destBed.id,
+        destinationBedId: destBed.id,
+        destination_bed_number: destBed.bed_number || destBed.bedNumber,
+        destinationBedNumber: destBed.bed_number || destBed.bedNumber,
+        destination_nurse_id: data.destinationNurseId || null,
+        destinationNurseId: data.destinationNurseId || null,
+        transfer_reason: (data.reason || data.transferReason || '').trim() || 'Clinical condition / ward transfer',
+        transferReason: (data.reason || data.transferReason || '').trim() || 'Clinical condition / ward transfer',
+        clinical_notes: (data.clinicalNotes || data.notes || '').trim(),
+        clinicalNotes: (data.clinicalNotes || data.notes || '').trim(),
+        status: 'APPROVED',
+        initiated_by_doctor_id: user.id || user._id,
+        initiatedByDoctorId: user.id || user._id,
+        initiating_doctor_name: doctorName,
+        initiatingDoctorName: doctorName,
+        initiated_at: nowIso,
+        initiatedAt: nowIso,
+        executed_by_nurse_id: null,
+        executing_nurse_name: null,
+        executed_at: null,
+        movement_notes: null,
+        created_at: nowIso,
+        updated_at: nowIso
+      };
+
+      if (!store.transfers) store.transfers = [];
+      store.transfers.unshift(transfer);
+
+      admission.pendingTransferId = transferId;
+      admission.pendingTransfer = transfer;
+
+      saveLocalStore(store);
+      return transfer;
+    } finally {
+      bedAllocationLocks.delete(data.destinationBedId);
+    }
+  },
+
+  async executePatientTransfer(clinicId, user, admissionId, transferId, data = {}) {
+    await this.verifyClinicIpd(clinicId);
+    if (!user || (user.role !== 'nurse' && user.role !== 'clinic' && user.role !== 'admin')) {
+      const err = new Error('Forbidden: Only an authorized nurse can execute patient transfers.');
+      err.code = 'NURSE_ONLY';
+      err.statusCode = 403;
+      throw err;
+    }
+
+    const store = getLocalStore();
+
+    // 1. Admission Validation
+    let admission = (store.admissions || []).find(a => (a.id === admissionId || a._id === admissionId) && a.clinic_id === clinicId);
+    if (!admission) {
+      try {
+        const { data: dbAdm } = await supabase.from('ipd_admissions').select('*').eq('id', admissionId).eq('clinic_id', clinicId).maybeSingle();
+        if (dbAdm) admission = dbAdm;
+      } catch (_) {}
+    }
+
+    if (!admission) {
+      const err = new Error('Inpatient admission record not found.');
+      err.code = 'ADMISSION_NOT_FOUND';
+      err.statusCode = 404;
+      throw err;
+    }
+
+    if ((admission.status || '').toLowerCase() !== 'admitted') {
+      const err = new Error(`Cannot execute transfer for admission with status: ${admission.status}. Patient is no longer admitted.`);
+      err.code = 'ADMISSION_NOT_ACTIVE';
+      err.statusCode = 400;
+      throw err;
+    }
+
+    // 2. Transfer Validation
+    const transfer = (store.transfers || []).find(t =>
+      t.id === transferId &&
+      (t.admission_id === admissionId || t.admissionId === admissionId) &&
+      t.clinic_id === clinicId
+    );
+
+    if (!transfer) {
+      const err = new Error('Transfer record not found for this admission.');
+      err.code = 'TRANSFER_NOT_FOUND';
+      err.statusCode = 404;
+      throw err;
+    }
+
+    if (transfer.status === 'COMPLETED') {
+      const err = new Error('This patient transfer has already been executed and completed.');
+      err.code = 'TRANSFER_ALREADY_COMPLETED';
+      err.statusCode = 400;
+      throw err;
+    }
+
+    if (transfer.status === 'CANCELLED') {
+      const err = new Error('Cannot execute a cancelled patient transfer.');
+      err.code = 'TRANSFER_CANCELLED';
+      err.statusCode = 400;
+      throw err;
+    }
+
+    if (transfer.status !== 'APPROVED') {
+      const err = new Error(`Invalid transfer status: ${transfer.status}. Only approved transfers can be executed.`);
+      err.code = 'INVALID_TRANSFER_STATUS';
+      err.statusCode = 400;
+      throw err;
+    }
+
+    // 3. Nurse Authorization & Ward Verification
+    if (user.role === 'nurse') {
+      const nurseId = user.id || user._id;
+      let nurse = (store.staff || []).find(s => (s.id === nurseId || s._id === nurseId) && s.clinic_id === clinicId);
+      if (!nurse) {
+        try {
+          const { data: dbNurse } = await supabase.from('staff').select('*').eq('id', nurseId).eq('clinic_id', clinicId).maybeSingle();
+          if (dbNurse) nurse = dbNurse;
+        } catch (_) {}
+      }
+
+      if (nurse && nurse.status !== 'active') {
+        const err = new Error('Forbidden: Inactive nurse cannot execute patient transfers.');
+        err.code = 'NURSE_INACTIVE';
+        err.statusCode = 403;
+        throw err;
+      }
+
+      const nurseWardId = nurse ? (nurse.assigned_ward_id || nurse.ward_id || nurse.wardId) : null;
+      const isAssignedToPatient = (admission.assigned_nurse_id === nurseId || admission.assignedNurseId === nurseId ||
+        (store.nurseAssignments || []).some(na => (na.admission_id === admission.id || na.admissionId === admission.id) && (na.nurse_id === nurseId || na.nurseId === nurseId) && na.is_active !== false));
+
+      const isSourceWardNurse = nurseWardId && String(nurseWardId) === String(transfer.source_ward_id);
+      const isDestWardNurse = nurseWardId && String(nurseWardId) === String(transfer.destination_ward_id);
+
+      if (!isAssignedToPatient && !isSourceWardNurse && !isDestWardNurse) {
+        const err = new Error('Forbidden: Only an authorized nurse assigned to this patient or the relevant wards can execute this transfer.');
+        err.code = 'FORBIDDEN_NURSE_TRANSFER';
+        err.statusCode = 403;
+        throw err;
+      }
+    }
+
+    // 4. Source Bed Turnaround: Move OCCUPIED -> CLEANING
+    const sourceBedId = transfer.source_bed_id || transfer.sourceBedId || admission.bed_id || admission.bedId;
+    let sourceBed = (store.beds || []).find(b => b.id === sourceBedId && b.clinic_id === clinicId);
+    if (!sourceBed) {
+      try {
+        const { data: dbSb } = await supabase.from('beds').select('*').eq('id', sourceBedId).eq('clinic_id', clinicId).maybeSingle();
+        if (dbSb) sourceBed = dbSb;
+      } catch (_) {}
+    }
+
+    if (sourceBed) {
+      sourceBed.status = 'CLEANING';
+      try {
+        await supabase.from('beds').update({ status: 'CLEANING' }).eq('id', sourceBedId).eq('clinic_id', clinicId);
+      } catch (_) {}
+      await recordBedStatusHistory(
+        clinicId,
+        sourceBedId,
+        'OCCUPIED',
+        'CLEANING',
+        user,
+        `Patient transferred to ${transfer.destination_ward_name} Bed ${transfer.destination_bed_number}`,
+        admissionId,
+        store
+      );
+    }
+
+    // 5. Destination Bed Allocation: Move RESERVED/AVAILABLE -> OCCUPIED
+    const destBedId = transfer.destination_bed_id || transfer.destinationBedId;
+    let destBed = (store.beds || []).find(b => b.id === destBedId && b.clinic_id === clinicId);
+    if (!destBed) {
+      try {
+        const { data: dbDb } = await supabase.from('beds').select('*').eq('id', destBedId).eq('clinic_id', clinicId).maybeSingle();
+        if (dbDb) destBed = dbDb;
+      } catch (_) {}
+    }
+
+    if (!destBed) {
+      const err = new Error('Destination bed record not found.');
+      err.code = 'DESTINATION_BED_NOT_FOUND';
+      err.statusCode = 404;
+      throw err;
+    }
+
+    if (destBed.is_active === false) {
+      const err = new Error('Cannot execute transfer to an inactive destination bed.');
+      err.code = 'BED_NOT_AVAILABLE';
+      err.statusCode = 400;
+      throw err;
+    }
+
+    const prevDestStatus = destBed.status || 'RESERVED';
+    destBed.status = 'OCCUPIED';
+    try {
+      await supabase.from('beds').update({ status: 'OCCUPIED' }).eq('id', destBedId).eq('clinic_id', clinicId);
+    } catch (_) {}
+
+    await recordBedStatusHistory(
+      clinicId,
+      destBedId,
+      prevDestStatus,
+      'OCCUPIED',
+      user,
+      `Patient transferred from ${transfer.source_ward_name} Bed ${transfer.source_bed_number}`,
+      admissionId,
+      store
+    );
+
+    // 6. Update Inpatient Admission Record
+    const nowIso = new Date().toISOString();
+    const nurseName = user.name || (user.first_name ? `${user.first_name} ${user.last_name || ''}`.trim() : 'Nurse');
+
+    admission.bed_id = destBed.id;
+    admission.bedId = destBed.id;
+    admission.bed_number = destBed.bed_number || destBed.bedNumber;
+    admission.bedNumber = destBed.bed_number || destBed.bedNumber;
+    admission.room_id = destBed.room_id || null;
+    admission.roomId = destBed.room_id || null;
+    admission.room_number = destBed.room_number || destBed.roomNumber || '';
+    admission.roomNumber = destBed.room_number || destBed.roomNumber || '';
+    admission.ward_id = transfer.destination_ward_id;
+    admission.wardId = transfer.destination_ward_id;
+    admission.ward_name = transfer.destination_ward_name;
+    admission.wardName = transfer.destination_ward_name;
+    admission.bed_daily_rate = Number(destBed.daily_rate || destBed.dailyRate || admission.bed_daily_rate || 500);
+
+    // Deactivate previous active nurse assignments for this admission (source nurse handoff)
+    if (store.nurseAssignments) {
+      store.nurseAssignments.forEach(na => {
+        if (na.admission_id === admissionId || na.admissionId === admissionId) {
+          na.is_active = false;
+          na.ended_at = nowIso;
+          na.end_reason = 'transferred_to_new_ward';
+        }
+      });
+    }
+
+    // Destination Ward Nurse Handover (HR: destination ward's Nurse takes over after handover)
+    const destNurseId = data.destinationNurseId || transfer.destination_nurse_id || transfer.destinationNurseId;
+    let assignedDestNurse = null;
+
+    if (destNurseId) {
+      const candidateNurse = (store.staff || []).find(s => (s.id === destNurseId || s._id === destNurseId) && s.clinic_id === clinicId);
+      if (candidateNurse && candidateNurse.status === 'active') {
+        const candidateWardId = candidateNurse.assigned_ward_id || candidateNurse.ward_id || candidateNurse.wardId;
+        if (!candidateWardId || String(candidateWardId) === String(transfer.destination_ward_id)) {
+          const localActive = (store.admissions || []).filter(a => a.clinic_id === clinicId && (a.status || '').toLowerCase() === 'admitted');
+          const activeCount = localActive.filter(a => (a.assigned_nurse_id === candidateNurse.id || a.assignedNurseId === candidateNurse.id)).length;
+          if (activeCount < 20) {
+            assignedDestNurse = candidateNurse;
+          }
+        }
+      }
+    }
+
+    // If no explicit nurse or not eligible, auto-assign an active nurse from destination ward with capacity (< 20)
+    if (!assignedDestNurse) {
+      const destWardNurses = (store.staff || []).filter(s =>
+        s.clinic_id === clinicId &&
+        s.role === 'nurse' &&
+        s.status === 'active' &&
+        String(s.assigned_ward_id || s.ward_id || s.wardId) === String(transfer.destination_ward_id)
+      );
+
+      const localActive = (store.admissions || []).filter(a => a.clinic_id === clinicId && (a.status || '').toLowerCase() === 'admitted');
+      for (const nurseCandidate of destWardNurses) {
+        const candidateId = nurseCandidate.id || nurseCandidate._id;
+        const count = localActive.filter(a => (a.assigned_nurse_id === candidateId || a.assignedNurseId === candidateId)).length;
+        if (count < 20) {
+          assignedDestNurse = nurseCandidate;
+          break;
+        }
+      }
+    }
+
+    if (assignedDestNurse) {
+      const destNurseName = `${assignedDestNurse.first_name || ''} ${assignedDestNurse.last_name || ''}`.trim() || assignedDestNurse.name || 'Staff Nurse';
+      const destNurseIdActual = assignedDestNurse.id || assignedDestNurse._id;
+      admission.assigned_nurse_id = destNurseIdActual;
+      admission.assignedNurseId = destNurseIdActual;
+      admission.nurse_name = destNurseName;
+      admission.nurseName = destNurseName;
+
+      const newAssignment = {
+        id: generateUUID(),
+        clinic_id: clinicId,
+        admission_id: admissionId,
+        nurse_id: destNurseIdActual,
+        ward_id: transfer.destination_ward_id,
+        assigned_at: nowIso,
+        is_active: true,
+        created_at: nowIso
+      };
+      if (!store.nurseAssignments) store.nurseAssignments = [];
+      store.nurseAssignments.push(newAssignment);
+    } else {
+      admission.assigned_nurse_id = null;
+      admission.assignedNurseId = null;
+      admission.nurse_name = null;
+      admission.nurseName = null;
+    }
+
+    admission.pendingTransferId = null;
+    admission.pendingTransfer = null;
+    admission.updated_at = nowIso;
+
+    // 7. Update Transfer Record
+    transfer.status = 'COMPLETED';
+    transfer.executed_by_nurse_id = user.id || user._id;
+    transfer.executedByNurseId = user.id || user._id;
+    transfer.executing_nurse_name = nurseName;
+    transfer.executingNurseName = nurseName;
+    transfer.executed_at = nowIso;
+    transfer.executedAt = nowIso;
+    transfer.movement_notes = (data.movementNotes || data.handoverNotes || data.notes || '').trim();
+    transfer.movementNotes = transfer.movement_notes;
+    transfer.handover_notes = transfer.movement_notes;
+    transfer.handoverNotes = transfer.movement_notes;
+    transfer.destination_nurse_id = assignedDestNurse ? (assignedDestNurse.id || assignedDestNurse._id) : null;
+    transfer.destinationNurseId = transfer.destination_nurse_id;
+    transfer.destination_nurse_name = assignedDestNurse ? admission.nurse_name : null;
+    transfer.destinationNurseName = transfer.destination_nurse_name;
+    transfer.updated_at = nowIso;
+
+    saveLocalStore(store);
+    return { transfer, admission, sourceBed, destinationBed: destBed };
+  },
+
+  async cancelPatientTransfer(clinicId, user, admissionId, transferId, data = {}) {
+    await this.verifyClinicIpd(clinicId);
+    const store = getLocalStore();
+
+    let admission = (store.admissions || []).find(a => (a.id === admissionId || a._id === admissionId) && a.clinic_id === clinicId);
+    if (!admission) {
+      const err = new Error('Inpatient admission record not found.');
+      err.code = 'ADMISSION_NOT_FOUND';
+      err.statusCode = 404;
+      throw err;
+    }
+
+    const transfer = (store.transfers || []).find(t =>
+      t.id === transferId &&
+      (t.admission_id === admissionId || t.admissionId === admissionId) &&
+      t.clinic_id === clinicId
+    );
+
+    if (!transfer) {
+      const err = new Error('Transfer record not found.');
+      err.code = 'TRANSFER_NOT_FOUND';
+      err.statusCode = 404;
+      throw err;
+    }
+
+    if (transfer.status === 'COMPLETED') {
+      const err = new Error('Cannot cancel an already completed patient transfer.');
+      err.code = 'TRANSFER_ALREADY_COMPLETED';
+      err.statusCode = 400;
+      throw err;
+    }
+
+    if (transfer.status === 'CANCELLED') {
+      return transfer;
+    }
+
+    // Release destination bed RESERVED -> AVAILABLE
+    const destBedId = transfer.destination_bed_id || transfer.destinationBedId;
+    let destBed = (store.beds || []).find(b => b.id === destBedId && b.clinic_id === clinicId);
+    if (destBed && destBed.status === 'RESERVED') {
+      destBed.status = 'AVAILABLE';
+      try {
+        await supabase.from('beds').update({ status: 'AVAILABLE' }).eq('id', destBedId).eq('clinic_id', clinicId);
+      } catch (_) {}
+
+      await recordBedStatusHistory(
+        clinicId,
+        destBedId,
+        'RESERVED',
+        'AVAILABLE',
+        user,
+        'Transfer cancelled: destination bed released to available',
+        admissionId,
+        store
+      );
+    }
+
+    const nowIso = new Date().toISOString();
+    transfer.status = 'CANCELLED';
+    transfer.cancelled_by = user.id || user._id;
+    transfer.cancelled_at = nowIso;
+    transfer.cancel_reason = (data.cancelReason || data.reason || 'Cancelled by clinical staff').trim();
+    transfer.updated_at = nowIso;
+
+    admission.pendingTransferId = null;
+    admission.pendingTransfer = null;
+
+    saveLocalStore(store);
+    return transfer;
+  },
+
+  async getAdmissionTransfers(clinicId, user, admissionId) {
+    await this.verifyClinicIpd(clinicId);
+    const store = getLocalStore();
+
+    const transfers = (store.transfers || [])
+      .filter(t => (t.admission_id === admissionId || t.admissionId === admissionId) && t.clinic_id === clinicId)
+      .sort((a, b) => new Date(b.created_at || b.initiated_at) - new Date(a.created_at || a.initiated_at));
+
+    const activeTransfer = transfers.find(t => t.status === 'APPROVED') || null;
+    return { transfers, activeTransfer };
+  },
+
+  async getClinicTransfers(clinicId, user, options = {}) {
+    await this.verifyClinicIpd(clinicId);
+    const store = getLocalStore();
+
+    let transfers = (store.transfers || []).filter(t => t.clinic_id === clinicId);
+
+    if (user && user.role === 'nurse') {
+      const nurseId = user.id || user._id;
+      let nurse = (store.staff || []).find(s => (s.id === nurseId || s._id === nurseId) && s.clinic_id === clinicId);
+      const nurseWardId = nurse ? (nurse.assigned_ward_id || nurse.ward_id || nurse.wardId) : null;
+      if (nurseWardId) {
+        transfers = transfers.filter(t =>
+          String(t.source_ward_id) === String(nurseWardId) ||
+          String(t.destination_ward_id) === String(nurseWardId) ||
+          t.destination_nurse_id === nurseId
+        );
+      }
+    }
+
+    if (options.status) {
+      transfers = transfers.filter(t => t.status === options.status);
+    }
+
+    return transfers.sort((a, b) => new Date(b.created_at || b.initiated_at) - new Date(a.created_at || a.initiated_at));
+  },
+
+// 1. Create Inpatient Prescription (Doctor-only)
+  async createIpdPrescription(clinicId, user, admissionId, data) {
+    await this.verifyClinicIpd(clinicId);
+    if (user && user.clinicId && String(user.clinicId) !== String(clinicId)) {
+      const err = new Error('Forbidden: Cross-clinic access prohibited.');
+      err.code = 'CROSS_CLINIC_FORBIDDEN';
+      err.statusCode = 403;
+      throw err;
+    }
+
+    if (!user || user.role !== 'doctor') {
+      const err = new Error('Forbidden: Only authenticated doctors can prescribe inpatient medications.');
+      err.code = 'DOCTOR_ONLY';
+      err.statusCode = 403;
+      throw err;
+    }
+
+    const store = getLocalStore();
+
+    let admission = (store.admissions || []).find(a => (a.id === admissionId || a._id === admissionId) && a.clinic_id === clinicId);
+    if (!admission) {
+      try {
+        const { data: dbAdm } = await supabase.from('ipd_admissions').select('*').eq('id', admissionId).eq('clinic_id', clinicId).maybeSingle();
+        if (dbAdm) admission = dbAdm;
+      } catch (_) {}
+    }
+
+    if (!admission) {
+      const err = new Error('Inpatient admission record not found.');
+      err.code = 'ADMISSION_NOT_FOUND';
+      err.statusCode = 404;
+      throw err;
+    }
+
+    if ((admission.status || '').toLowerCase() === 'discharged') {
+      const err = new Error('Cannot prescribe medications for a discharged admission.');
+      err.code = 'ADMISSION_ALREADY_DISCHARGED';
+      err.statusCode = 400;
+      throw err;
+    }
+
+    const medName = (data.medication_name || data.name || data.medicine || '').trim();
+    if (!medName) {
+      const err = new Error('Medication name is required.');
+      err.code = 'MEDICATION_NAME_REQUIRED';
+      err.statusCode = 400;
+      throw err;
+    }
+
+    const dosage = (data.dosage || data.dose || '').trim();
+    if (!dosage) {
+      const err = new Error('Prescribed dosage is required.');
+      err.code = 'DOSAGE_REQUIRED';
+      err.statusCode = 400;
+      throw err;
+    }
+
+    const route = (data.route || 'Oral').trim();
+    const frequency = (data.frequency || 'OD').trim();
+    const instructions = (data.instructions || data.instruction || data.directions || '').trim() || null;
+    const duration = (data.duration || '').trim() || null;
+
+    const doctorId = user.id || user._id;
+    let doctorName = user.name;
+    if (!doctorName && (data.doctor_name || data.doctorName)) {
+      doctorName = data.doctor_name || data.doctorName;
+    }
+    if (!doctorName) {
+      if (user.first_name || user.firstName) {
+        doctorName = `Dr. ${user.first_name || user.firstName} ${user.last_name || user.lastName || ''}`.trim();
+      } else {
+        const d = (store.doctors || []).find(doc => doc.id === doctorId || doc._id === doctorId);
+        if (d) doctorName = d.name || `Dr. ${d.first_name || ''} ${d.last_name || ''}`.trim();
+      }
+    }
+    if (!doctorName) doctorName = 'Dr. Attending Physician';
+
+    const presId = generateUUID();
+    const nowIso = new Date().toISOString();
+    const scheduleTimes = parseScheduleTimes(frequency, data.schedule);
+
+    const prescription = {
+      id: presId,
+      _id: presId,
+      clinic_id: clinicId,
+      clinicId,
+      admission_id: admissionId,
+      admissionId,
+      admission_number: admission.admission_number || admission.admissionNumber,
+      admissionNumber: admission.admission_number || admission.admissionNumber,
+      patient_id: admission.patient_id || admission.patientId,
+      patientId: admission.patient_id || admission.patientId,
+      patient_name: admission.patient_name || admission.patientName,
+      patientName: admission.patient_name || admission.patientName,
+      doctor_id: doctorId,
+      doctorId,
+      doctor_name: doctorName,
+      doctorName,
+      medication_name: medName,
+      medicationName: medName,
+      dosage,
+      dose: dosage,
+      route,
+      frequency,
+      schedule: scheduleTimes,
+      schedule_times: scheduleTimes,
+      instructions,
+      duration,
+      start_date: data.start_date || nowIso,
+      startDate: data.start_date || nowIso,
+      end_date: data.end_date || null,
+      endDate: data.end_date || null,
+      status: 'active',
+      created_at: nowIso,
+      createdAt: nowIso,
+      updated_at: nowIso,
+      updatedAt: nowIso
+    };
+
+    if (!store.prescriptions) store.prescriptions = [];
+    store.prescriptions.unshift(prescription);
+
+    const storeAdm = (store.admissions || []).find(a => a.id === admissionId || a._id === admissionId);
+    if (storeAdm) {
+      if (!storeAdm.prescriptions) storeAdm.prescriptions = [];
+      storeAdm.prescriptions.unshift(prescription);
+    }
+
+    saveLocalStore(store);
+
+    await auditService.recordLog({
+      user: { ...user, name: doctorName, clinicId },
+      action: 'CREATE_IPD_PRESCRIPTION',
+      resourceType: 'InpatientPrescription',
+      resourceId: presId,
+      changes: {
+        admissionId,
+        medicationName: medName,
+        dosage,
+        route,
+        frequency,
+        schedule: scheduleTimes
+      }
+    });
+
+    return prescription;
+  },
+
+  
+  // Discontinue Inpatient Prescription (Doctor-only)
+  async discontinueIpdPrescription(clinicId, user, admissionId, prescriptionId, data = {}) {
+    await this.verifyClinicIpd(clinicId);
+    if (user && user.clinicId && String(user.clinicId) !== String(clinicId)) {
+      const err = new Error('Forbidden: Cross-clinic access prohibited.');
+      err.code = 'CROSS_CLINIC_FORBIDDEN';
+      err.statusCode = 403;
+      throw err;
+    }
+
+    if (!user || user.role !== 'doctor') {
+      const err = new Error('Forbidden: Only authenticated doctors can discontinue inpatient prescriptions.');
+      err.code = 'DOCTOR_ONLY';
+      err.statusCode = 403;
+      throw err;
+    }
+
+    const reason = (data.reason || data.discontinuation_reason || data.notes || '').trim();
+    if (!reason || reason.length < 3) {
+      const err = new Error('A mandatory clinical reason is required to discontinue an inpatient prescription (minimum 3 characters).');
+      err.code = 'DISCONTINUATION_REASON_REQUIRED';
+      err.statusCode = 400;
+      throw err;
+    }
+
+    const store = getLocalStore();
+
+    let admission = (store.admissions || []).find(a => (a.id === admissionId || a._id === admissionId) && (a.clinic_id === clinicId || a.clinicId === clinicId));
+    if (!admission) {
+      const err = new Error('Inpatient admission record not found.');
+      err.code = 'ADMISSION_NOT_FOUND';
+      err.statusCode = 404;
+      throw err;
+    }
+
+    let prescription = (store.prescriptions || []).find(p =>
+      (p.id === prescriptionId || p._id === prescriptionId) &&
+      (p.admission_id === admissionId || p.admissionId === admissionId)
+    );
+
+    if (!prescription && admission.prescriptions && Array.isArray(admission.prescriptions)) {
+      prescription = admission.prescriptions.find(p => p.id === prescriptionId || p._id === prescriptionId);
+    }
+
+    if (!prescription) {
+      const err = new Error('Prescription record not found for this admission.');
+      err.code = 'PRESCRIPTION_NOT_FOUND';
+      err.statusCode = 404;
+      throw err;
+    }
+
+    if ((prescription.status || '').toLowerCase() === 'discontinued') {
+      const err = new Error('Prescription is already discontinued.');
+      err.code = 'PRESCRIPTION_ALREADY_DISCONTINUED';
+      err.statusCode = 400;
+      throw err;
+    }
+
+    const doctorId = user.id || user._id;
+    let doctorName = user.name;
+    if (!doctorName) {
+      if (user.first_name || user.firstName) {
+        doctorName = `Dr. ${user.first_name || user.firstName} ${user.last_name || user.lastName || ''}`.trim();
+      } else {
+        const d = (store.doctors || []).find(doc => doc.id === doctorId || doc._id === doctorId);
+        if (d) doctorName = d.name || `Dr. ${d.first_name || ''} ${d.last_name || ''}`.trim();
+      }
+    }
+    if (!doctorName) doctorName = 'Dr. Doctor';
+
+    const nowIso = data.discontinued_at || new Date().toISOString();
+
+    prescription.status = 'discontinued';
+    prescription.discontinued_at = nowIso;
+    prescription.discontinuedAt = nowIso;
+    prescription.discontinued_by = doctorId;
+    prescription.discontinuedBy = doctorId;
+    prescription.discontinued_by_name = doctorName;
+    prescription.discontinuedByName = doctorName;
+    prescription.discontinuation_reason = reason;
+    prescription.discontinuationReason = reason;
+    prescription.updated_at = nowIso;
+    prescription.updatedAt = nowIso;
+
+    const storeAdm = (store.admissions || []).find(a => a.id === admissionId || a._id === admissionId);
+    if (storeAdm && Array.isArray(storeAdm.prescriptions)) {
+      const nestedP = storeAdm.prescriptions.find(p => p.id === prescriptionId || p._id === prescriptionId);
+      if (nestedP) {
+        nestedP.status = 'discontinued';
+        nestedP.discontinued_at = nowIso;
+        nestedP.discontinuedAt = nowIso;
+        nestedP.discontinued_by = doctorId;
+        nestedP.discontinuedBy = doctorId;
+        nestedP.discontinued_by_name = doctorName;
+        nestedP.discontinuedByName = doctorName;
+        nestedP.discontinuation_reason = reason;
+        nestedP.discontinuationReason = reason;
+        nestedP.updated_at = nowIso;
+        nestedP.updatedAt = nowIso;
+      }
+    }
+
+    if (!store.audit_logs) store.audit_logs = [];
+    store.audit_logs.push({
+      id: generateUUID(),
+      action: 'DISCONTINUE_IPD_PRESCRIPTION',
+      resource_type: 'InpatientPrescription',
+      resource_id: prescription.id,
+      resourceId: prescription.id,
+      clinic_id: clinicId,
+      user_id: doctorId,
+      user_role: 'doctor',
+      user_name: doctorName,
+      created_at: nowIso,
+      changes: {
+        admissionId,
+        medicationName: prescription.medication_name || prescription.medicationName,
+        status: 'discontinued',
+        discontinuationReason: reason,
+        discontinuedAt: nowIso,
+        discontinuedByName: doctorName
+      }
+    });
+
+    saveLocalStore(store);
+
+    await auditService.recordLog({
+      user: { ...user, name: doctorName, clinicId },
+      action: 'DISCONTINUE_IPD_PRESCRIPTION',
+      resourceType: 'InpatientPrescription',
+      resourceId: prescription.id,
+      changes: {
+        admissionId,
+        medicationName: prescription.medication_name || prescription.medicationName,
+        status: 'discontinued',
+        discontinuationReason: reason,
+        discontinuedAt: nowIso,
+        discontinuedByName: doctorName
+      }
+    });
+
+    return prescription;
+  },
+
+  // 2. Get Inpatient Prescriptions
+  async getIpdPrescriptions(clinicId, user, admissionId) {
+    await this.verifyClinicIpd(clinicId);
+    if (user && user.clinicId && String(user.clinicId) !== String(clinicId)) {
+      const err = new Error('Forbidden: Cross-clinic access prohibited.');
+      err.code = 'CROSS_CLINIC_FORBIDDEN';
+      err.statusCode = 403;
+      throw err;
+    }
+
+    const store = getLocalStore();
+    const nurseId = user ? (user.id || user._id) : null;
+
+    if (user && user.role === 'nurse') {
+      let nurse = (store.staff || []).find(s => (s.id === nurseId || s._id === nurseId) && s.clinic_id === clinicId);
+      if (nurse && nurse.status !== 'active') {
+        const err = new Error('Forbidden: Inactive nurse cannot access prescriptions.');
+        err.code = 'NURSE_INACTIVE';
+        err.statusCode = 403;
+        throw err;
+      }
+    }
+
+    let admission = (store.admissions || []).find(a => (a.id === admissionId || a._id === admissionId) && a.clinic_id === clinicId);
+    if (!admission) {
+      try {
+        const { data: dbAdm } = await supabase.from('ipd_admissions').select('*').eq('id', admissionId).eq('clinic_id', clinicId).maybeSingle();
+        if (dbAdm) admission = dbAdm;
+      } catch (_) {}
+    }
+
+    if (!admission) {
+      const err = new Error('Inpatient admission record not found.');
+      err.code = 'ADMISSION_NOT_FOUND';
+      err.statusCode = 404;
+      throw err;
+    }
+
+    if (user && user.role === 'nurse') {
+      const isAssigned = (admission.assigned_nurse_id === nurseId || admission.assignedNurseId === nurseId);
+      const hasActiveAssignment = (store.nurseAssignments || []).some(
+        na => (na.admission_id === admissionId || na.admissionId === admissionId) &&
+              (na.nurse_id === nurseId || na.nurseId === nurseId) &&
+              na.is_active !== false
+      );
+      if (!isAssigned && !hasActiveAssignment) {
+        const err = new Error('Forbidden: Nurse is not assigned to this inpatient admission.');
+        err.code = 'FORBIDDEN_NURSE_UNASSIGNED';
+        err.statusCode = 403;
+        throw err;
+      }
+
+      let nurseRecord = (store.staff || []).find(s => (s.id === nurseId || s._id === nurseId) && s.clinic_id === clinicId);
+      if (nurseRecord && nurseRecord.assigned_ward_id && admission.ward_id && String(nurseRecord.assigned_ward_id) !== String(admission.ward_id)) {
+        const err = new Error('Forbidden: Nurse assigned ward does not match patient admission ward.');
+        err.code = 'FORBIDDEN_WARD_MISMATCH';
+        err.statusCode = 403;
+        throw err;
+      }
+    }
+
+    let prescriptions = (store.prescriptions || []).filter(p =>
+      (p.admission_id === admissionId || p.admissionId === admissionId) &&
+      (p.clinic_id === clinicId || p.clinicId === clinicId)
+    );
+
+    if (prescriptions.length === 0 && admission.prescriptions && Array.isArray(admission.prescriptions)) {
+      prescriptions = admission.prescriptions;
+    }
+
+    return prescriptions;
+  },
+
+  // 3. Get Patient Medications and MAR (Active Prescriptions + Administration History + Scheduled Doses)
+  async getPatientMedicationsAndMAR(clinicId, user, admissionId, query = {}) {
+    await this.verifyClinicIpd(clinicId);
+    if (user && user.clinicId && String(user.clinicId) !== String(clinicId)) {
+      const err = new Error('Forbidden: Cross-clinic access prohibited.');
+      err.code = 'CROSS_CLINIC_FORBIDDEN';
+      err.statusCode = 403;
+      throw err;
+    }
+
+    const store = getLocalStore();
+    const nurseId = user ? (user.id || user._id) : null;
+
+    if (user && user.role === 'nurse') {
+      let nurse = (store.staff || []).find(s => (s.id === nurseId || s._id === nurseId) && s.clinic_id === clinicId);
+      if (nurse && nurse.status !== 'active') {
+        const err = new Error('Forbidden: Inactive nurse cannot access MAR.');
+        err.code = 'NURSE_INACTIVE';
+        err.statusCode = 403;
+        throw err;
+      }
+    }
+
+    let admission = (store.admissions || []).find(a => (a.id === admissionId || a._id === admissionId) && a.clinic_id === clinicId);
+    if (!admission) {
+      try {
+        const { data: dbAdm } = await supabase.from('ipd_admissions').select('*').eq('id', admissionId).eq('clinic_id', clinicId).maybeSingle();
+        if (dbAdm) admission = dbAdm;
+      } catch (_) {}
+    }
+
+    if (!admission) {
+      const err = new Error('Inpatient admission record not found.');
+      err.code = 'ADMISSION_NOT_FOUND';
+      err.statusCode = 404;
+      throw err;
+    }
+
+    if (user && user.role === 'nurse') {
+      const isAssigned = (admission.assigned_nurse_id === nurseId || admission.assignedNurseId === nurseId);
+      const hasActiveAssignment = (store.nurseAssignments || []).some(
+        na => (na.admission_id === admissionId || na.admissionId === admissionId) &&
+              (na.nurse_id === nurseId || na.nurseId === nurseId) &&
+              na.is_active !== false
+      );
+      if (!isAssigned && !hasActiveAssignment) {
+        const err = new Error('Forbidden: Nurse is not assigned to this inpatient admission.');
+        err.code = 'FORBIDDEN_NURSE_UNASSIGNED';
+        err.statusCode = 403;
+        throw err;
+      }
+
+      let nurseRecord = (store.staff || []).find(s => (s.id === nurseId || s._id === nurseId) && s.clinic_id === clinicId);
+      if (nurseRecord && nurseRecord.assigned_ward_id && admission.ward_id && String(nurseRecord.assigned_ward_id) !== String(admission.ward_id)) {
+        const err = new Error('Forbidden: Nurse assigned ward does not match patient admission ward.');
+        err.code = 'FORBIDDEN_WARD_MISMATCH';
+        err.statusCode = 403;
+        throw err;
+      }
+    }
+
+    // Target date for schedule (defaults to today in YYYY-MM-DD)
+    const targetDateStr = query.date || new Date().toISOString().split('T')[0];
+
+    // Find prescriptions
+    let prescriptions = (store.prescriptions || []).filter(p =>
+      (p.admission_id === admissionId || p.admissionId === admissionId) &&
+      (p.clinic_id === clinicId || p.clinicId === clinicId)
+    );
+
+    if (prescriptions.length === 0 && admission.prescriptions && Array.isArray(admission.prescriptions)) {
+      prescriptions = admission.prescriptions;
+    }
+
+    // If no prescriptions exist yet, initialize standard active clinical orders from admitting doctor
+    if (prescriptions.length === 0) {
+      const docName = admission.admitting_doctor_name || admission.admittingDoctorName || 'Dr. Doctor';
+      const docId = admission.admitting_doctor_id || admission.admittingDoctorId || 'doc-primary';
+      const nowIso = new Date().toISOString();
+
+      const defaultPrescriptions = [
+        {
+          id: generateUUID(),
+          clinic_id: clinicId,
+          clinicId,
+          admission_id: admissionId,
+          admissionId,
+          admission_number: admission.admission_number || admission.admissionNumber,
+          admissionNumber: admission.admission_number || admission.admissionNumber,
+          patient_id: admission.patient_id || admission.patientId,
+          patientId: admission.patient_id || admission.patientId,
+          patient_name: admission.patient_name || admission.patientName,
+          patientName: admission.patient_name || admission.patientName,
+          doctor_id: docId,
+          doctorId: docId,
+          doctor_name: docName,
+          doctorName: docName,
+          medication_name: 'Paracetamol 500mg Tab',
+          medicationName: 'Paracetamol 500mg Tab',
+          dosage: '500mg',
+          dose: '500mg',
+          route: 'Oral',
+          frequency: 'TDS',
+          schedule: ['08:00', '14:00', '20:00'],
+          schedule_times: ['08:00', '14:00', '20:00'],
+          instructions: 'Take after food. Monitor temperature spikes.',
+          duration: '5 days',
+          start_date: nowIso,
+          startDate: nowIso,
+          status: 'active',
+          created_at: nowIso,
+          createdAt: nowIso
+        },
+        {
+          id: generateUUID(),
+          clinic_id: clinicId,
+          clinicId,
+          admission_id: admissionId,
+          admissionId,
+          admission_number: admission.admission_number || admission.admissionNumber,
+          admissionNumber: admission.admission_number || admission.admissionNumber,
+          patient_id: admission.patient_id || admission.patientId,
+          patientId: admission.patient_id || admission.patientId,
+          patient_name: admission.patient_name || admission.patientName,
+          patientName: admission.patient_name || admission.patientName,
+          doctor_id: docId,
+          doctorId: docId,
+          doctor_name: docName,
+          doctorName: docName,
+          medication_name: 'Ceftriaxone 1g Inj',
+          medicationName: 'Ceftriaxone 1g Inj',
+          dosage: '1g',
+          dose: '1g',
+          route: 'IV',
+          frequency: 'BD',
+          schedule: ['09:00', '21:00'],
+          schedule_times: ['09:00', '21:00'],
+          instructions: 'Administer slow IV push over 3-5 mins. Check cannula site.',
+          duration: '7 days',
+          start_date: nowIso,
+          startDate: nowIso,
+          status: 'active',
+          created_at: nowIso,
+          createdAt: nowIso
+        },
+        {
+          id: generateUUID(),
+          clinic_id: clinicId,
+          clinicId,
+          admission_id: admissionId,
+          admissionId,
+          admission_number: admission.admission_number || admission.admissionNumber,
+          admissionNumber: admission.admission_number || admission.admissionNumber,
+          patient_id: admission.patient_id || admission.patientId,
+          patientId: admission.patient_id || admission.patientId,
+          patient_name: admission.patient_name || admission.patientName,
+          patientName: admission.patient_name || admission.patientName,
+          doctor_id: docId,
+          doctorId: docId,
+          doctor_name: docName,
+          doctorName: docName,
+          medication_name: 'Pantoprazole 40mg Inj',
+          medicationName: 'Pantoprazole 40mg Inj',
+          dosage: '40mg',
+          dose: '40mg',
+          route: 'IV',
+          frequency: 'OD',
+          schedule: ['08:00'],
+          schedule_times: ['08:00'],
+          instructions: 'Early morning, fasting. Flush before and after.',
+          duration: '5 days',
+          start_date: nowIso,
+          startDate: nowIso,
+          status: 'active',
+          created_at: nowIso,
+          createdAt: nowIso
+        }
+      ];
+
+      if (!store.prescriptions) store.prescriptions = [];
+      defaultPrescriptions.forEach(p => store.prescriptions.push(p));
+      prescriptions = defaultPrescriptions;
+
+      const storeAdm = (store.admissions || []).find(a => a.id === admissionId || a._id === admissionId);
+      if (storeAdm) {
+        storeAdm.prescriptions = defaultPrescriptions;
+      }
+      saveLocalStore(store);
+    }
+
+    // Retrieve MAR records for this admission
+    const allMar = (store.marRecords || []).filter(m =>
+      (m.admission_id === admissionId || m.admissionId === admissionId) &&
+      (m.clinic_id === clinicId || m.clinicId === clinicId)
+    );
+
+    const sortedMar = [...allMar].sort((a, b) =>
+      new Date(b.administered_at || b.administeredAt || b.created_at) -
+      new Date(a.administered_at || a.administeredAt || a.created_at)
+    );
+
+    // Build scheduled dose slots for targetDateStr
+    const scheduledDoses = [];
+    const activePrescriptions = prescriptions.filter(p => (p.status || 'active').toLowerCase() === 'active');
+
+    for (const pres of prescriptions) {
+      const isDiscontinued = (pres.status || '').toLowerCase() === 'discontinued';
+      const discontinuedAt = pres.discontinued_at || pres.discontinuedAt;
+
+      // If prescription was discontinued prior to targetDateStr, skip future generation completely
+      if (isDiscontinued && discontinuedAt) {
+        const discDate = discontinuedAt.slice(0, 10);
+        if (targetDateStr > discDate) {
+          continue;
+        }
+      } else if (isDiscontinued && !discontinuedAt) {
+        continue;
+      }
+      const times = parseScheduleTimes(pres.frequency, pres.schedule || pres.schedule_times);
+
+      for (const time of times) {
+        // Slot identifier
+        const slotKey = `${targetDateStr}T${time}:00`;
+        const timeShort = time;
+
+        // If prescription is discontinued, stop generating future scheduled doses from effective discontinuation time
+        if (isDiscontinued && discontinuedAt) {
+          const isFutureSlot = slotKey >= discontinuedAt;
+          const hasRecord = allMar.some(m =>
+            (m.prescription_id === pres.id || m.prescriptionId === pres.id) &&
+            ((m.scheduled_time && (m.scheduled_time === slotKey || m.scheduled_time === timeShort || m.scheduled_time.includes(timeShort))) ||
+             (m.administered_at && m.administered_at.startsWith(targetDateStr) && m.scheduled_time === timeShort))
+          );
+          if (isFutureSlot && !hasRecord) {
+            continue;
+          }
+        }
+
+        // Check for matching MAR record
+        const matchingMar = allMar.find(m => {
+          if (m.prescription_id !== pres.id && m.prescriptionId !== pres.id) return false;
+          const mScheduled = m.scheduled_time || m.scheduledTime;
+          if (mScheduled) {
+            if (mScheduled === slotKey || mScheduled === timeShort || mScheduled.includes(timeShort)) return true;
+          }
+          const mAdmin = m.administered_at || m.administeredAt;
+          if (mAdmin && mAdmin.startsWith(targetDateStr) && m.scheduled_time === timeShort) {
+            return true;
+          }
+          return false;
+        });
+
+        scheduledDoses.push({
+          slotId: `${pres.id}_${targetDateStr}_${time.replace(':', '')}`,
+          slotKey,
+          scheduledDate: targetDateStr,
+          scheduledTime: time,
+          prescriptionId: pres.id,
+          medicationName: pres.medication_name || pres.medicationName,
+          prescribedDose: pres.dosage || pres.dose,
+          route: pres.route,
+          frequency: pres.frequency,
+          instructions: pres.instructions,
+          status: matchingMar ? matchingMar.status : 'SCHEDULED',
+          isRecorded: Boolean(matchingMar),
+          marRecord: matchingMar || null,
+          marId: matchingMar ? (matchingMar.id || matchingMar._id) : null,
+          administeredAt: matchingMar ? (matchingMar.administered_at || matchingMar.administeredAt) : null,
+          administeredDose: matchingMar ? (matchingMar.administered_dose || matchingMar.administeredDose) : null,
+          nurseName: matchingMar ? (matchingMar.nurse_name || matchingMar.nurseName) : null,
+          nurseId: matchingMar ? (matchingMar.nurse_id || matchingMar.nurseId) : null,
+          reason: matchingMar ? matchingMar.reason : null,
+          notes: matchingMar ? (matchingMar.notes || matchingMar.remarks) : null
+        });
+      }
+    }
+
+    return {
+      admission: {
+        id: admission.id,
+        admission_number: admission.admission_number || admission.admissionNumber,
+        patient_name: admission.patient_name || admission.patientName,
+        ward_id: admission.ward_id || admission.wardId,
+        ward_name: admission.ward_name || admission.wardName,
+        bed_id: admission.bed_id || admission.bedId,
+        bed_number: admission.bed_number || admission.bedNumber,
+        assigned_nurse_id: admission.assigned_nurse_id || admission.assignedNurseId,
+        status: admission.status
+      },
+      prescriptions,
+      activePrescriptions,
+      marRecords: sortedMar,
+      scheduledDoses,
+      date: targetDateStr
+    };
+  },
+
+  // 4. Record Medication Administration (Nurse-only)
+  async recordMedicationAdministration(clinicId, user, admissionId, data) {
+    await this.verifyClinicIpd(clinicId);
+    if (user && user.clinicId && String(user.clinicId) !== String(clinicId)) {
+      const err = new Error('Forbidden: Cross-clinic access prohibited.');
+      err.code = 'CROSS_CLINIC_FORBIDDEN';
+      err.statusCode = 403;
+      throw err;
+    }
+
+    if (!user || user.role !== 'nurse') {
+      const err = new Error('Forbidden: Only authorized nurses can record medication administration.');
+      err.code = 'NURSE_ONLY';
+      err.statusCode = 403;
+      throw err;
+    }
+
+    const store = getLocalStore();
+    const nurseId = user.id || user._id;
+
+    let nurse = (store.staff || []).find(s => (s.id === nurseId || s._id === nurseId) && s.clinic_id === clinicId);
+    if (!nurse) {
+      try {
+        const { data: dbNurse } = await supabase.from('staff').select('*').eq('id', nurseId).eq('clinic_id', clinicId).maybeSingle();
+        if (dbNurse) nurse = dbNurse;
+      } catch (_) {}
+    }
+
+    if (nurse && nurse.status !== 'active') {
+      const err = new Error('Forbidden: Inactive nurse cannot record medication administration.');
+      err.code = 'NURSE_INACTIVE';
+      err.statusCode = 403;
+      throw err;
+    }
+
+    let admission = (store.admissions || []).find(a => (a.id === admissionId || a._id === admissionId) && a.clinic_id === clinicId);
+    if (!admission) {
+      try {
+        const { data: dbAdm } = await supabase.from('ipd_admissions').select('*').eq('id', admissionId).eq('clinic_id', clinicId).maybeSingle();
+        if (dbAdm) admission = dbAdm;
+      } catch (_) {}
+    }
+
+    if (!admission) {
+      const err = new Error('Inpatient admission record not found.');
+      err.code = 'ADMISSION_NOT_FOUND';
+      err.statusCode = 404;
+      throw err;
+    }
+
+    if ((admission.status || '').toLowerCase() === 'discharged') {
+      const err = new Error('Cannot record medication administration on a discharged admission.');
+      err.code = 'ADMISSION_ALREADY_DISCHARGED';
+      err.statusCode = 400;
+      throw err;
+    }
+
+    // Check assignment
+    const isAssigned = (admission.assigned_nurse_id === nurseId || admission.assignedNurseId === nurseId);
+    const hasActiveAssignment = (store.nurseAssignments || []).some(
+      na => (na.admission_id === admissionId || na.admissionId === admissionId) &&
+            (na.nurse_id === nurseId || na.nurseId === nurseId) &&
+            na.is_active !== false
+    );
+    if (!isAssigned && !hasActiveAssignment) {
+      const err = new Error('Forbidden: Nurse is not assigned to this inpatient admission.');
+      err.code = 'FORBIDDEN_NURSE_UNASSIGNED';
+      err.statusCode = 403;
+      throw err;
+    }
+
+    // Ward restriction check
+    if (nurse && nurse.assigned_ward_id && admission.ward_id && String(nurse.assigned_ward_id) !== String(admission.ward_id)) {
+      const err = new Error('Forbidden: Nurse assigned ward does not match patient admission ward.');
+      err.code = 'FORBIDDEN_WARD_MISMATCH';
+      err.statusCode = 403;
+      throw err;
+    }
+
+    // Validate prescription
+    const presId = data.prescription_id || data.prescriptionId;
+    if (!presId) {
+      const err = new Error('Prescription ID is required.');
+      err.code = 'PRESCRIPTION_REQUIRED';
+      err.statusCode = 400;
+      throw err;
+    }
+
+    let prescription = (store.prescriptions || []).find(p =>
+      (p.id === presId || p._id === presId) &&
+      (p.admission_id === admissionId || p.admissionId === admissionId)
+    );
+
+    if (!prescription && admission.prescriptions && Array.isArray(admission.prescriptions)) {
+      prescription = admission.prescriptions.find(p => p.id === presId || p._id === presId);
+    }
+
+    if (!prescription) {
+      const err = new Error('Prescription record not found for this admission.');
+      err.code = 'PRESCRIPTION_NOT_FOUND';
+      err.statusCode = 404;
+      throw err;
+    }
+
+    if (prescription.status && prescription.status.toLowerCase() !== 'active') {
+      const err = new Error('Cannot administer medication for an inactive or discontinued prescription.');
+      err.code = 'PRESCRIPTION_INACTIVE';
+      err.statusCode = 400;
+      throw err;
+    }
+
+    // Status validation
+    const status = (data.status || '').toUpperCase().trim();
+    if (!['ADMINISTERED', 'MISSED', 'REFUSED'].includes(status)) {
+      const err = new Error('Status must be ADMINISTERED, MISSED, or REFUSED.');
+      err.code = 'INVALID_STATUS';
+      err.statusCode = 400;
+      throw err;
+    }
+
+    // Reason validation
+    const reason = (data.reason || '').trim();
+    if (['MISSED', 'REFUSED'].includes(status) && (!reason || reason.length < 3)) {
+      const err = new Error(`A mandatory clinical reason is required when recording a dose as ${status}.`);
+      err.code = 'REASON_REQUIRED';
+      err.statusCode = 400;
+      throw err;
+    }
+
+    // Administered dose validation
+    let administeredDose = (data.dose_given || data.administered_dose || data.administeredDose || prescription.dosage || prescription.dose || '').trim();
+    if (status === 'ADMINISTERED' && !administeredDose) {
+      const err = new Error('Administered dose must be specified.');
+      err.code = 'DOSE_REQUIRED';
+      err.statusCode = 400;
+      throw err;
+    }
+
+    // Duplicate check
+    const scheduledTime = data.scheduled_time || data.scheduledTime || null;
+    if (!store.marRecords) store.marRecords = [];
+
+    if (scheduledTime) {
+      const isDuplicate = store.marRecords.some(r =>
+        (r.prescription_id === prescription.id || r.prescriptionId === prescription.id) &&
+        (r.scheduled_time === scheduledTime || r.scheduledTime === scheduledTime)
+      );
+      if (isDuplicate) {
+        const err = new Error(`A dose administration record already exists for scheduled time slot: ${scheduledTime}.`);
+        err.code = 'DUPLICATE_DOSE_RECORD';
+        err.statusCode = 409;
+        throw err;
+      }
+    }
+
+    // Nurse name resolution
+    let nurseName = user.name;
+    if (!nurseName && (user.first_name || user.firstName)) {
+      nurseName = `${user.first_name || user.firstName} ${user.last_name || user.lastName || ''}`.trim();
+    }
+    if (!nurseName && nurse) {
+      nurseName = nurse.name || `${nurse.first_name || ''} ${nurse.last_name || ''}`.trim();
+    }
+    if (!nurseName) nurseName = 'Staff Nurse';
+
+    const marId = generateUUID();
+    const nowIso = new Date().toISOString();
+    const administeredAt = data.administered_at || data.administeredAt || nowIso;
+
+    const marRecord = {
+      id: marId,
+      _id: marId,
+      clinic_id: clinicId,
+      clinicId,
+      admission_id: admissionId,
+      admissionId,
+      admission_number: admission.admission_number || admission.admissionNumber,
+      admissionNumber: admission.admission_number || admission.admissionNumber,
+      patient_id: admission.patient_id || admission.patientId,
+      patientId: admission.patient_id || admission.patientId,
+      patient_name: admission.patient_name || admission.patientName,
+      patientName: admission.patient_name || admission.patientName,
+      prescription_id: prescription.id,
+      prescriptionId: prescription.id,
+      medication_name: prescription.medication_name || prescription.medicationName,
+      medicationName: prescription.medication_name || prescription.medicationName,
+      prescribed_dose: prescription.dosage || prescription.dose,
+      prescribedDose: prescription.dosage || prescription.dose,
+      administered_dose: status === 'ADMINISTERED' ? administeredDose : null,
+      administeredDose: status === 'ADMINISTERED' ? administeredDose : null,
+      route: data.route || prescription.route || 'Oral',
+      scheduled_time: scheduledTime,
+      scheduledTime,
+      administered_at: administeredAt,
+      administeredAt,
+      status, // ADMINISTERED | MISSED | REFUSED
+      reason: ['MISSED', 'REFUSED'].includes(status) ? reason : null,
+      notes: (data.notes || data.remarks || '').trim() || null,
+      remarks: (data.notes || data.remarks || '').trim() || null,
+      nurse_id: nurseId,
+      nurseId,
+      nurse_name: nurseName,
+      nurseName,
+      created_at: nowIso,
+      createdAt: nowIso
+    };
+
+    store.marRecords.unshift(marRecord);
+
+    const storeAdm = (store.admissions || []).find(a => a.id === admissionId || a._id === admissionId);
+    if (storeAdm) {
+      if (!storeAdm.marRecords) storeAdm.marRecords = [];
+      storeAdm.marRecords.unshift(marRecord);
+    }
+
+    saveLocalStore(store);
+
+    await auditService.recordLog({
+      user: { ...user, name: nurseName, clinicId },
+      action: `RECORD_MAR_${status}`,
+      resourceType: 'MedicationAdministrationRecord',
+      resourceId: marId,
+      changes: {
+        admissionId,
+        prescriptionId: prescription.id,
+        medicationName: marRecord.medication_name,
+        status,
+        doseGiven: marRecord.administered_dose,
+        reason: marRecord.reason,
+        scheduledTime
+      },
+      metadata: {
+        nurseId,
+        nurseName,
+        administeredAt
+      }
+    });
+
+    return marRecord;
+  },
+
+  // ==========================================
+  // RADIOLOGY INVESTIGATIONS WORKFLOW
+  // ==========================================
+
+  // 1. Doctor: Create Radiology Investigation Order
+  async createRadiologyOrder(clinicId, user, admissionId, data) {
+    await this.verifyClinicIpd(clinicId);
+    if (user && user.clinicId && String(user.clinicId) !== String(clinicId)) {
+      const err = new Error('Forbidden: Cross-clinic access prohibited.');
+      err.code = 'CROSS_CLINIC_FORBIDDEN';
+      err.statusCode = 403;
+      throw err;
+    }
+
+    if (!user || !['doctor', 'clinic', 'admin'].includes(user.role)) {
+      const err = new Error('Forbidden: Only authorized doctors can order radiology investigations.');
+      err.code = 'DOCTOR_ONLY';
+      err.statusCode = 403;
+      throw err;
+    }
+
+    const store = getLocalStore();
+
+    let admission = (store.admissions || []).find(a => (a.id === admissionId || a._id === admissionId) && (a.clinic_id === clinicId || a.clinicId === clinicId));
+    if (!admission) {
+      try {
+        const { data: dbAdm } = await supabase.from('ipd_admissions').select('*').eq('id', admissionId).eq('clinic_id', clinicId).maybeSingle();
+        if (dbAdm) admission = dbAdm;
+      } catch (_) {}
+    }
+
+    if (!admission) {
+      const err = new Error('Inpatient admission record not found.');
+      err.code = 'ADMISSION_NOT_FOUND';
+      err.statusCode = 404;
+      throw err;
+    }
+
+    if ((admission.status || '').toLowerCase() === 'discharged') {
+      const err = new Error('Cannot order radiology investigations on a discharged admission.');
+      err.code = 'ADMISSION_ALREADY_DISCHARGED';
+      err.statusCode = 400;
+      throw err;
+    }
+
+    const investigationType = (data.investigation_type || data.investigationType || '').trim();
+    if (!investigationType) {
+      const err = new Error('Investigation type is required (e.g., X-Ray, CT Scan, Ultrasound, MRI).');
+      err.code = 'INVESTIGATION_TYPE_REQUIRED';
+      err.statusCode = 400;
+      throw err;
+    }
+
+    const studyName = (data.study_name || data.studyName || data.investigation_name || '').trim();
+    if (!studyName || studyName.length < 2) {
+      const err = new Error('Study name is required (minimum 2 characters).');
+      err.code = 'STUDY_NAME_REQUIRED';
+      err.statusCode = 400;
+      throw err;
+    }
+
+    const clinicalIndication = (data.clinical_indication || data.clinicalIndication || data.indication || '').trim();
+    if (!clinicalIndication || clinicalIndication.length < 3) {
+      const err = new Error('A clinical indication is mandatory for radiology orders (minimum 3 characters).');
+      err.code = 'CLINICAL_INDICATION_REQUIRED';
+      err.statusCode = 400;
+      throw err;
+    }
+
+        // Destination Laboratory Validation
+    const labId = (data.lab_id || data.labId || '').trim();
+    if (!labId) {
+      const err = new Error('Destination laboratory is required for radiology investigations.');
+      err.code = 'DESTINATION_LAB_REQUIRED';
+      err.statusCode = 400;
+      throw err;
+    }
+
+    let labName = (data.lab_name || data.labName || '').trim();
+    if (!labName) {
+      const allLabs = (store.labs || []);
+      const l = allLabs.find(lab => lab.id === labId || lab._id === labId);
+      if (l) labName = l.lab_name || l.name;
+    }
+    if (!labName) {
+      try {
+        const { data: dbLab } = await supabase.from('labs').select('lab_name, status').eq('id', labId).maybeSingle();
+        if (dbLab) {
+          if ((dbLab.status || 'active').toLowerCase() !== 'active') {
+            const err = new Error('The selected destination laboratory is inactive.');
+            err.code = 'INACTIVE_LAB';
+            err.statusCode = 400;
+            throw err;
+          }
+          labName = dbLab.lab_name;
+        }
+      } catch (_) {}
+    }
+    if (!labName) labName = 'Diagnostic Imaging Facility';
+
+    // Duplicate check: prevent duplicate pending order for exact same study within last 10 minutes
+    const now = Date.now();
+    const tenMinsAgo = new Date(now - 10 * 60 * 1000).toISOString();
+    const existingOrders = (store.radiologyOrders || []).filter(o =>
+      (o.admission_id === admissionId || o.admissionId === admissionId) &&
+      o.investigation_type?.toLowerCase() === investigationType.toLowerCase() &&
+      o.study_name?.toLowerCase() === studyName.toLowerCase() &&
+      ['ORDERED', 'PENDING', 'IN_PROGRESS'].includes((o.status || '').toUpperCase()) &&
+      o.created_at >= tenMinsAgo
+    );
+
+    if (existingOrders.length > 0) {
+      const err = new Error(`A pending radiology order for "${studyName}" was already placed recently. Avoid duplicate requisitions.`);
+      err.code = 'DUPLICATE_RADIOLOGY_ORDER';
+      err.statusCode = 409;
+      throw err;
+    }
+
+    const doctorId = user.id || user._id;
+    let doctorName = user.name;
+    if (!doctorName && (data.doctor_name || data.doctorName)) doctorName = data.doctor_name || data.doctorName;
+    if (!doctorName) {
+      if (user.first_name || user.firstName) {
+        doctorName = `Dr. ${user.first_name || user.firstName} ${user.last_name || user.lastName || ''}`.trim();
+      } else {
+        const d = (store.doctors || []).find(doc => doc.id === doctorId || doc._id === doctorId);
+        if (d) doctorName = d.name || `Dr. ${d.first_name || ''} ${d.last_name || ''}`.trim();
+      }
+    }
+    if (!doctorName) doctorName = 'Dr. Attending Physician';
+
+    const orderId = generateUUID();
+    const orderNumber = `RAD-${Date.now().toString().slice(-6)}`;
+    const nowIso = new Date().toISOString();
+
+    const priority = (data.priority || 'routine').toLowerCase();
+
+    // Standard Diagnostic Radiology Tariffs lookup catalog
+    const STANDARD_RADIOLOGY_TARIFFS = {
+      'chest x-ray pa view': 600,
+      'chest pa view': 600,
+      'chest ap (portable bedside)': 750,
+      'chest ap (bedside portable)': 750,
+      'chest ap': 750,
+      'abdomen erect & supine': 800,
+      'abdomen erect and supine': 800,
+      'left knee ap/lateral': 600,
+      'left knee ap / lateral': 600,
+      'right knee ap/lateral': 600,
+      'right knee ap / lateral': 600,
+      'lumbar spine ap/lateral': 700,
+      'lumbar spine ap / lateral': 700,
+      'hrct chest non-contrast': 3500,
+      'hrct chest': 3500,
+      'ncct head / brain': 2800,
+      'ncct head': 2800,
+      'ncct brain': 2800,
+      'cect whole abdomen': 5000,
+      'cect abdomen': 5000,
+      'ct angiography pulmonary': 6500,
+      'ct pulmonary angiography': 6500,
+      'ct cervical spine': 3200,
+      'ct c-spine': 3200,
+      'usg whole abdomen & pelvis': 1500,
+      'usg abdomen & pelvis': 1500,
+      'usg kub (kidney, ureter, bladder)': 1200,
+      'usg kub': 1200,
+      'fast bedside protocol': 1800,
+      'fast bedside': 1800,
+      'venous doppler lower limb': 2500,
+      'usg venous doppler lower limb': 2500,
+      'usg thyroid / neck': 1400,
+      'usg neck / thyroid': 1400,
+      'mri brain non-contrast': 6000,
+      'mri brain with dwi': 6000,
+      'mri brain': 6000,
+      'mri lumbar spine': 6500,
+      'mri cervical spine': 6500,
+      'mri knee joint': 5500
+    };
+
+    let orderPrice = null;
+    if (data.price !== undefined && data.price !== null && !isNaN(Number(data.price))) {
+      orderPrice = Number(data.price);
+    } else if (data.amount !== undefined && data.amount !== null && !isNaN(Number(data.amount))) {
+      orderPrice = Number(data.amount);
+    } else if (data.tariff !== undefined && data.tariff !== null && !isNaN(Number(data.tariff))) {
+      orderPrice = Number(data.tariff);
+    } else if (data.total_amount !== undefined && data.total_amount !== null && !isNaN(Number(data.total_amount))) {
+      orderPrice = Number(data.total_amount);
+    } else {
+      const normalizedStudy = studyName.trim().toLowerCase();
+      if (STANDARD_RADIOLOGY_TARIFFS[normalizedStudy] !== undefined) {
+        orderPrice = STANDARD_RADIOLOGY_TARIFFS[normalizedStudy];
+      }
+    }
+
+    const newOrder = {
+      id: orderId,
+      _id: orderId,
+      order_number: orderNumber,
+      orderNumber,
+      clinic_id: clinicId,
+      clinicId,
+      admission_id: admissionId,
+      admissionId,
+      admission_number: admission.admission_number || admission.admissionNumber,
+      patient_id: admission.patient_id || admission.patientId,
+      patientId: admission.patient_id || admission.patientId,
+      patient_name: admission.patient_name || admission.patientName,
+      patientName: admission.patient_name || admission.patientName,
+      patient_code: admission.patient_code || admission.patientCode,
+      ward_id: admission.ward_id || admission.wardId,
+      ward_name: admission.ward_name || admission.wardName,
+      bed_id: admission.bed_id || admission.bedId,
+      bed_number: admission.bed_number || admission.bedNumber,
+      doctor_id: doctorId,
+      doctorId,
+      doctor_name: doctorName,
+      doctorName,
+      investigation_type: investigationType,
+      investigationType,
+      study_name: studyName,
+      studyName,
+      clinical_indication: clinicalIndication,
+      clinicalIndication,
+      priority,
+      category: 'radiology',
+      has_radiology: true,
+      is_radiology: true,
+      price: orderPrice,
+      amount: orderPrice,
+      total_amount: orderPrice,
+      tariff: orderPrice,
+      tariff_configured: orderPrice !== null && orderPrice !== undefined,
+      items: [
+        {
+          id: generateUUID(),
+          item_type: 'radiology',
+          item_name: `${investigationType}: ${studyName}`,
+          item_code: `RAD-${investigationType.replace(/\s+/g, '').toUpperCase().slice(0, 3)}-${Date.now().toString().slice(-4)}`,
+          modality: investigationType,
+          study_name: studyName,
+          clinical_indication: clinicalIndication,
+          instructions: (data.instructions || '').trim(),
+          price: orderPrice,
+          tariff: orderPrice
+        }
+      ],
+      lab_id: labId,
+      labId,
+      lab_name: labName,
+      labName,
+      destination_lab: {
+        id: labId,
+        name: labName
+      },
+      instructions: (data.instructions || '').trim(),
+      transport_mode: data.transport_mode || 'ambulatory',
+      status: 'ORDERED',
+      report: null,
+      created_at: nowIso,
+      createdAt: nowIso,
+      updated_at: nowIso,
+      updatedAt: nowIso
+    };
+
+    if (!store.radiologyOrders) store.radiologyOrders = [];
+    store.radiologyOrders.unshift(newOrder);
+
+    // Sync to admission nested radiology_orders if present
+    const storeAdm = (store.admissions || []).find(a => a.id === admissionId || a._id === admissionId);
+    if (storeAdm) {
+      if (!storeAdm.radiology_orders) storeAdm.radiology_orders = [];
+      storeAdm.radiology_orders.unshift(newOrder);
+    }
+
+    if (!store.audit_logs) store.audit_logs = [];
+    store.audit_logs.push({
+      id: generateUUID(),
+      action: 'CREATE_IPD_RADIOLOGY_ORDER',
+      resource_type: 'RadiologyOrder',
+      resource_id: orderId,
+      resourceId: orderId,
+      clinic_id: clinicId,
+      user_id: doctorId,
+      user_role: user.role,
+      user_name: doctorName,
+      created_at: nowIso,
+      changes: {
+        admissionId,
+        orderNumber,
+        investigationType,
+        studyName,
+        clinicalIndication,
+        priority
+      }
+    });
+
+    saveLocalStore(store);
+
+    await auditService.recordLog({
+      user: { ...user, name: doctorName, clinicId },
+      action: 'CREATE_IPD_RADIOLOGY_ORDER',
+      resourceType: 'RadiologyOrder',
+      resourceId: orderId,
+      changes: {
+        admissionId,
+        orderNumber,
+        investigationType,
+        studyName,
+        priority
+      }
+    });
+
+    return newOrder;
+  },
+
+  // 2. Get Radiology Orders for an Inpatient Admission
+  async getAdmissionRadiologyOrders(clinicId, user, admissionId) {
+    await this.verifyClinicIpd(clinicId);
+    if (user && user.clinicId && String(user.clinicId) !== String(clinicId)) {
+      const err = new Error('Forbidden: Cross-clinic access prohibited.');
+      err.code = 'CROSS_CLINIC_FORBIDDEN';
+      err.statusCode = 403;
+      throw err;
+    }
+
+    const store = getLocalStore();
+
+    let admission = (store.admissions || []).find(a =>
+      ((a.id === admissionId || a._id === admissionId) ||
+       (a.admission_number === admissionId || a.admissionNumber === admissionId)) &&
+      (a.clinic_id === clinicId || a.clinicId === clinicId)
+    );
+    if (!admission) {
+      try {
+        const { data: dbAdm } = await supabase.from('ipd_admissions').select('*')
+          .or(`id.eq.${admissionId},admission_number.eq.${admissionId}`)
+          .eq('clinic_id', clinicId).maybeSingle();
+        if (dbAdm) admission = dbAdm;
+      } catch (_) {}
+    }
+
+    if (!admission) {
+      const err = new Error('Inpatient admission record not found.');
+      err.code = 'ADMISSION_NOT_FOUND';
+      err.statusCode = 404;
+      throw err;
+    }
+
+    const admId = String(admission.id || admission._id);
+    const admNum = String(admission.admission_number || admission.admissionNumber || '');
+
+    // Nurse permission & assignment check
+    if (user && user.role === 'nurse') {
+      const nurseId = String(user.id || user._id);
+
+      let nurse = (store.staff || []).find(s => (String(s.id) === nurseId || String(s._id) === nurseId) && (s.clinic_id === clinicId || s.clinicId === clinicId));
+      if (!nurse) {
+        try {
+          const { data: dbNurse } = await supabase.from('staff').select('*').eq('id', nurseId).eq('clinic_id', clinicId).maybeSingle();
+          if (dbNurse) nurse = dbNurse;
+        } catch (_) {}
+      }
+
+      if (nurse && nurse.status !== 'active') {
+        const err = new Error('Forbidden: Inactive nurse cannot access patient records.');
+        err.code = 'NURSE_INACTIVE';
+        err.statusCode = 403;
+        throw err;
+      }
+
+      // Ward restriction check
+      const nurseWardId = (nurse && (nurse.assigned_ward_id || nurse.ward_id)) || user.assigned_ward_id || user.wardId;
+      const admissionWardId = admission.ward_id || admission.wardId;
+      if (nurseWardId && admissionWardId && String(nurseWardId) !== String(admissionWardId)) {
+        const err = new Error('Forbidden: Nurse assigned ward does not match patient admission ward.');
+        err.code = 'FORBIDDEN_WARD_MISMATCH';
+        err.statusCode = 403;
+        throw err;
+      }
+
+      // Check assignment
+      const isAssigned = (String(admission.assigned_nurse_id || admission.assignedNurseId) === nurseId);
+      const hasActiveAssignment = (store.nurseAssignments || []).some(
+        na => {
+          const naAdmId = String(na.admission_id || na.admissionId || '');
+          const matchesAdm = naAdmId === admId || (admNum && naAdmId === admNum);
+          const matchesNurse = String(na.nurse_id || na.nurseId) === nurseId;
+          return matchesAdm && matchesNurse && na.is_active !== false;
+        }
+      );
+
+      if (!isAssigned && !hasActiveAssignment) {
+        const err = new Error('Forbidden: Nurse is not assigned to this inpatient admission.');
+        err.code = 'FORBIDDEN_NURSE_UNASSIGNED';
+        err.statusCode = 403;
+        throw err;
+      }
+    }
+
+    const orders = (store.radiologyOrders || []).filter(o => {
+      const orderAdmId = String(o.admission_id || o.admissionId || '');
+      const orderAdmNum = String(o.admission_number || o.admissionNumber || '');
+      const matchesAdmission = (orderAdmId && (orderAdmId === admId || (admNum && orderAdmId === admNum))) ||
+                               (orderAdmNum && (orderAdmNum === admNum || orderAdmNum === admId));
+      const matchesClinic = (!clinicId || String(o.clinic_id || o.clinicId) === String(clinicId));
+      return matchesAdmission && matchesClinic;
+    });
+
+    return orders.sort((a, b) => new Date(b.created_at || b.createdAt) - new Date(a.created_at || a.createdAt));
+  },
+
+  // 3. Diagnostic Staff: Query Radiology Orders (Overview across IPD)
+  async getRadiologyOrders(clinicId, user, query = {}) {
+    const isLab = user && user.role === 'lab';
+    if (!isLab) {
+      if (!clinicId) {
+        const err = new Error('Clinic ID is required.');
+        err.code = 'MISSING_FIELD';
+        err.statusCode = 400;
+        throw err;
+      }
+      await this.verifyClinicIpd(clinicId);
+      if (user && user.clinicId && String(user.clinicId) !== String(clinicId)) {
+        const err = new Error('Forbidden: Cross-clinic access prohibited.');
+        err.code = 'CROSS_CLINIC_FORBIDDEN';
+        err.statusCode = 403;
+        throw err;
+      }
+    } else if (clinicId) {
+      await this.verifyClinicIpd(clinicId);
+    }
+
+    if (user && !['lab', 'doctor', 'clinic', 'admin', 'nurse'].includes(user.role)) {
+      const err = new Error('Forbidden: Only diagnostic staff, doctors, clinic administrators, and assigned nurses can query radiology orders overview.');
+      err.code = 'FORBIDDEN';
+      err.statusCode = 403;
+      throw err;
+    }
+
+    const store = getLocalStore();
+    let orders = store.radiologyOrders || [];
+    if (clinicId) {
+      orders = orders.filter(o => o.clinic_id === clinicId || o.clinicId === clinicId);
+    }
+
+    // Nurse Role Scoping: A nurse ONLY sees orders for their currently assigned inpatient admissions within their permitted ward
+    if (user && user.role === 'nurse') {
+      const nurseId = user.id || user._id;
+
+      let nurse = (store.staff || []).find(s => (s.id === nurseId || s._id === nurseId) && s.clinic_id === clinicId);
+      if (!nurse) {
+        try {
+          const { data: dbNurse } = await supabase.from('staff').select('*').eq('id', nurseId).eq('clinic_id', clinicId).maybeSingle();
+          if (dbNurse) nurse = dbNurse;
+        } catch (_) {}
+      }
+
+      if (nurse && nurse.status !== 'active') {
+        const err = new Error('Forbidden: Inactive nurse cannot access patient records.');
+        err.code = 'NURSE_INACTIVE';
+        err.statusCode = 403;
+        throw err;
+      }
+
+      const nurseWardId = (nurse && (nurse.assigned_ward_id || nurse.ward_id)) || user.assigned_ward_id || user.wardId;
+
+      // Find all active admissions assigned to this nurse
+      const clinicAdmissions = (store.admissions || []).filter(a => a.clinic_id === clinicId || a.clinicId === clinicId);
+      const assignedAdmissionIds = new Set();
+
+      for (const adm of clinicAdmissions) {
+        const admWardId = adm.ward_id || adm.wardId;
+        // Verify ward match if ward restriction is configured
+        if (nurseWardId && admWardId && String(nurseWardId) !== String(admWardId)) {
+          continue;
+        }
+
+        const isDirectlyAssigned = (adm.assigned_nurse_id === nurseId || adm.assignedNurseId === nurseId);
+        const hasActiveAssignment = (store.nurseAssignments || []).some(
+          na => (na.admission_id === adm.id || na.admissionId === adm.id) &&
+                (na.nurse_id === nurseId || na.nurseId === nurseId) &&
+                na.is_active !== false
+        );
+
+        if (isDirectlyAssigned || hasActiveAssignment) {
+          assignedAdmissionIds.add(String(adm.id || adm._id));
+        }
+      }
+
+      // If nurse has no assigned admissions, return empty list immediately
+      if (assignedAdmissionIds.size === 0) {
+        return [];
+      }
+
+      // Scope orders strictly to the nurse's assigned admissions
+      orders = orders.filter(o => assignedAdmissionIds.has(String(o.admission_id || o.admissionId)));
+    }
+
+    // Laboratory Scoping: Diagnostic staff only view orders routed to their specific facility
+    if (isLab) {
+      const callerLabId = String(user.labId || user.id);
+      orders = orders.filter(o => {
+        const oLab = String(o.lab_id || o.labId || o.destination_lab?.id || '');
+        return oLab === callerLabId;
+      });
+    }
+
+    if (query.labId || query.lab_id) {
+      const qLab = query.labId || query.lab_id;
+      orders = orders.filter(o => o.lab_id === qLab || o.labId === qLab);
+    }
+
+    if (query.status) {
+      const s = String(query.status).toUpperCase();
+      orders = orders.filter(o => (o.status || '').toUpperCase() === s);
+    }
+
+    if (query.admissionId || query.admission_id) {
+      const aid = query.admissionId || query.admission_id;
+      orders = orders.filter(o => o.admission_id === aid || o.admissionId === aid);
+    }
+
+    if (query.patientId || query.patient_id) {
+      const pid = query.patientId || query.patient_id;
+      orders = orders.filter(o => o.patient_id === pid || o.patientId === pid);
+    }
+
+    if (query.investigationType || query.investigation_type) {
+      const it = (query.investigationType || query.investigation_type).toLowerCase();
+      orders = orders.filter(o => o.investigation_type?.toLowerCase() === it);
+    }
+
+    return orders.sort((a, b) => new Date(b.created_at || b.createdAt) - new Date(a.created_at || a.createdAt));
+  },
+
+  // 4. Update Radiology Order Status (In Progress / Cancel)
+  async updateRadiologyOrderStatus(clinicId, user, admissionId, orderId, data = {}) {
+    const store = getLocalStore();
+    let order = (store.radiologyOrders || []).find(o =>
+      (o.id === orderId || o._id === orderId) &&
+      (o.admission_id === admissionId || o.admissionId === admissionId) &&
+      (!clinicId || o.clinic_id === clinicId || o.clinicId === clinicId)
+    );
+
+    if (!order) {
+      const err = new Error('Radiology order not found.');
+      err.code = 'ORDER_NOT_FOUND';
+      err.statusCode = 404;
+      throw err;
+    }
+
+    const resolvedClinicId = clinicId || order.clinic_id || order.clinicId;
+    if (user && user.role !== 'lab') {
+      if (!resolvedClinicId) {
+        const err = new Error('Clinic ID is required.');
+        err.code = 'MISSING_FIELD';
+        err.statusCode = 400;
+        throw err;
+      }
+      await this.verifyClinicIpd(resolvedClinicId);
+      if (user.clinicId && String(user.clinicId) !== String(resolvedClinicId)) {
+        const err = new Error('Forbidden: Cross-clinic access prohibited.');
+        err.code = 'CROSS_CLINIC_FORBIDDEN';
+        err.statusCode = 403;
+        throw err;
+      }
+    }
+
+    if (!order) {
+      const err = new Error('Radiology order not found.');
+      err.code = 'ORDER_NOT_FOUND';
+      err.statusCode = 404;
+      throw err;
+    }
+
+    const nextStatus = (data.status || '').toUpperCase().trim();
+    if (!['ORDERED', 'IN_PROGRESS', 'COMPLETED', 'CANCELLED'].includes(nextStatus)) {
+      const err = new Error('Status must be ORDERED, IN_PROGRESS, COMPLETED, or CANCELLED.');
+      err.code = 'INVALID_STATUS';
+      err.statusCode = 400;
+      throw err;
+    }
+
+    // Cancellation authorization: only Doctor or Admin
+    if (nextStatus === 'CANCELLED') {
+      if (!['doctor', 'clinic', 'admin'].includes(user.role)) {
+        const err = new Error('Forbidden: Only attending doctors or clinic administrators can cancel radiology orders.');
+        err.code = 'DOCTOR_ONLY';
+        err.statusCode = 403;
+        throw err;
+      }
+      if (order.status === 'COMPLETED') {
+        const err = new Error('Cannot cancel an already completed radiology order.');
+        err.code = 'ORDER_ALREADY_COMPLETED';
+        err.statusCode = 400;
+        throw err;
+      }
+    }
+
+    // Moving to IN_PROGRESS: Diagnostic staff or Doctor
+    if (nextStatus === 'IN_PROGRESS') {
+      if (user.role === 'nurse') {
+        const err = new Error('Forbidden: Nurses cannot alter radiology order workflow status.');
+        err.code = 'FORBIDDEN';
+        err.statusCode = 403;
+        throw err;
+      }
+      if (user.role === 'lab') {
+        const callerLabId = user.labId || user.id;
+        if (order.lab_id && String(order.lab_id) !== String(callerLabId)) {
+          const err = new Error('Forbidden: Only the assigned destination laboratory can update status on this order.');
+          err.code = 'FORBIDDEN_LAB_MISMATCH';
+          err.statusCode = 403;
+          throw err;
+        }
+      }
+    }
+
+    const nowIso = new Date().toISOString();
+    order.status = nextStatus;
+    order.updated_at = nowIso;
+    order.updatedAt = nowIso;
+    order.status_updated_by = user.id || user._id;
+    order.status_updated_at = nowIso;
+    if (data.reason || data.notes) {
+      order.status_reason = data.reason || data.notes;
+    }
+
+    saveLocalStore(store);
+
+    await auditService.recordLog({
+      user,
+      action: 'UPDATE_IPD_RADIOLOGY_STATUS',
+      resourceType: 'RadiologyOrder',
+      resourceId: orderId,
+      changes: {
+        admissionId,
+        newStatus: nextStatus,
+        reason: data.reason || data.notes
+      }
+    });
+
+    return order;
+  },
+
+  // 5. Diagnostic Staff: Upload / Attach Finalized Radiology Report
+  async attachRadiologyReport(clinicId, user, admissionId, orderId, data = {}) {
+    // Diagnostic staff check & RBAC
+    if (!user) {
+      const err = new Error('Forbidden: Unauthenticated user.');
+      err.code = 'FORBIDDEN';
+      err.statusCode = 403;
+      throw err;
+    }
+
+    if (user.role === 'nurse') {
+      const err = new Error('Forbidden: Nurses cannot attach or modify radiology reports.');
+      err.code = 'FORBIDDEN';
+      err.statusCode = 403;
+      throw err;
+    }
+
+    // Diagnostic staff validation: Check RBAC
+    // Pathologists, Lab Admins, Radiologists, Doctors, Clinic Admins can issue reports
+    // Lab technicians without report issuance permission MUST be rejected!
+    const labRole = (user.labRole || user.lab_role || '').toLowerCase();
+    const isTech = user.role === 'technician' || labRole === 'technician';
+
+    if (isTech) {
+      // Check if user has explicit issue_reports permission
+      const perms = Array.isArray(user.permissions) ? user.permissions : [];
+      if (!perms.includes('issue_reports') && !perms.includes('validate_results')) {
+        const err = new Error('Forbidden: Lab technicians without report issuance authorization cannot finalize radiology reports.');
+        err.code = 'FORBIDDEN_REPORT_ISSUANCE';
+        err.statusCode = 403;
+        throw err;
+      }
+    } else {
+      const isAllowedRole = ['admin', 'clinic', 'doctor', 'lab'].includes(user.role) ||
+        ['lab_admin', 'pathologist', 'radiologist'].includes(labRole);
+      if (!isAllowedRole) {
+        const err = new Error('Forbidden: You do not have permission to attach radiology reports.');
+        err.code = 'FORBIDDEN';
+        err.statusCode = 403;
+        throw err;
+      }
+    }
+
+    const store = getLocalStore();
+    let order = (store.radiologyOrders || []).find(o =>
+      (o.id === orderId || o._id === orderId) &&
+      (o.admission_id === admissionId || o.admissionId === admissionId) &&
+      (!clinicId || o.clinic_id === clinicId || o.clinicId === clinicId)
+    );
+
+    if (!order) {
+      try {
+        const { data: dbOrder } = await supabase
+          .from('ipd_radiology_orders')
+          .select('*')
+          .eq('id', orderId)
+          .eq('admission_id', admissionId)
+          .maybeSingle();
+        if (dbOrder) order = dbOrder;
+      } catch (_) {}
+    }
+
+    if (!order) {
+      const err = new Error('Radiology order not found.');
+      err.code = 'ORDER_NOT_FOUND';
+      err.statusCode = 404;
+      throw err;
+    }
+
+    const resolvedClinicId = clinicId || order.clinic_id || order.clinicId;
+    if (user.role !== 'lab') {
+      if (!resolvedClinicId) {
+        const err = new Error('Clinic ID is required.');
+        err.code = 'MISSING_FIELD';
+        err.statusCode = 400;
+        throw err;
+      }
+      await this.verifyClinicIpd(resolvedClinicId);
+      if (user.clinicId && String(user.clinicId) !== String(resolvedClinicId)) {
+        const err = new Error('Forbidden: Cross-clinic access prohibited.');
+        err.code = 'CROSS_CLINIC_FORBIDDEN';
+        err.statusCode = 403;
+        throw err;
+      }
+    }
+
+    if (!order) {
+      try {
+        const { data: dbOrder } = await supabase
+          .from('ipd_radiology_orders')
+          .select('*')
+          .eq('id', orderId)
+          .eq('admission_id', admissionId)
+          .maybeSingle();
+        if (dbOrder) order = dbOrder;
+      } catch (_) {}
+    }
+
+    if (!order) {
+      const err = new Error('Radiology order not found.');
+      err.code = 'ORDER_NOT_FOUND';
+      err.statusCode = 404;
+      throw err;
+    }
+
+    if (user.role === 'lab') {
+      const callerLabId = user.labId || user.id;
+      if (order.lab_id && String(order.lab_id) !== String(callerLabId)) {
+        const err = new Error('Forbidden: Only the assigned destination laboratory can finalize reports for this order.');
+        err.code = 'FORBIDDEN_LAB_MISMATCH';
+        err.statusCode = 403;
+        throw err;
+      }
+    }
+
+    if (order.status === 'CANCELLED') {
+      const err = new Error('Cannot attach a report to a cancelled radiology order.');
+      err.code = 'ORDER_CANCELLED';
+      err.statusCode = 400;
+      throw err;
+    }
+
+    if (order.status === 'COMPLETED' || order.report) {
+      const err = new Error('Radiology report has already been finalized for this order. Alteration of finalized reports is prohibited.');
+      err.code = 'REPORT_ALREADY_FINALIZED';
+      err.statusCode = 409;
+      throw err;
+    }
+
+    const findings = (data.findings || '').trim();
+    if (!findings || findings.length < 3) {
+      const err = new Error('Diagnostic findings are mandatory (minimum 3 characters).');
+      err.code = 'FINDINGS_REQUIRED';
+      err.statusCode = 400;
+      throw err;
+    }
+
+    const impression = (data.impression || '').trim();
+    if (!impression || impression.length < 3) {
+      const err = new Error('Diagnostic impression is mandatory (minimum 3 characters).');
+      err.code = 'IMPRESSION_REQUIRED';
+      err.statusCode = 400;
+      throw err;
+    }
+
+    const nowIso = new Date().toISOString();
+    const uploaderId = user.id || user._id;
+    let uploaderName = user.name;
+    if (!uploaderName && (data.uploader_name || data.uploaderName)) uploaderName = data.uploader_name || data.uploaderName;
+    if (!uploaderName) {
+      if (user.first_name || user.firstName) {
+        uploaderName = `${user.first_name || user.firstName} ${user.last_name || user.lastName || ''}`.trim();
+      } else {
+        const staffRec = (store.staff || []).find(s => s.id === uploaderId || s._id === uploaderId);
+        if (staffRec) uploaderName = staffRec.name || `${staffRec.first_name || ''} ${staffRec.last_name || ''}`.trim();
+      }
+    }
+    if (!uploaderName) uploaderName = 'Radiologist / Diagnostic Specialist';
+
+    const reportId = generateUUID();
+    const reportObj = {
+      report_id: reportId,
+      reportId,
+      findings,
+      impression,
+      file_url: data.file_url || data.fileUrl || null,
+      file_name: data.file_name || data.fileName || null,
+      file_size: data.file_size || data.fileSize || null,
+      mime_type: data.mime_type || data.mimeType || null,
+      recommendations: (data.recommendations || '').trim(),
+      critical_findings: Boolean(data.critical_findings || data.criticalFindings),
+      uploaded_at: nowIso,
+      uploadedAt: nowIso,
+      uploaded_by: uploaderId,
+      uploadedBy: uploaderId,
+      uploaded_by_name: uploaderName,
+      uploadedByName: uploaderName,
+      uploaded_by_role: user.role === 'lab' ? (labRole || 'radiologist') : user.role,
+      finalized_at: nowIso,
+      finalizedAt: nowIso
+    };
+
+    order.report = reportObj;
+    order.status = 'COMPLETED';
+    order.updated_at = nowIso;
+    order.updatedAt = nowIso;
+
+    // Sync to nested admission order if present
+    const storeAdm = (store.admissions || []).find(a => a.id === admissionId || a._id === admissionId);
+    if (storeAdm && Array.isArray(storeAdm.radiology_orders)) {
+      const nestedO = storeAdm.radiology_orders.find(o => o.id === orderId || o._id === orderId);
+      if (nestedO) {
+        nestedO.report = reportObj;
+        nestedO.status = 'COMPLETED';
+        nestedO.updated_at = nowIso;
+        nestedO.updatedAt = nowIso;
+      }
+    }
+
+    if (!store.audit_logs) store.audit_logs = [];
+    store.audit_logs.push({
+      id: generateUUID(),
+      action: 'COMPLETE_IPD_RADIOLOGY_REPORT',
+      resource_type: 'RadiologyOrder',
+      resource_id: orderId,
+      resourceId: orderId,
+      clinic_id: resolvedClinicId,
+      user_id: uploaderId,
+      user_role: user.role,
+      user_name: uploaderName,
+      created_at: nowIso,
+      changes: {
+        admissionId,
+        orderId,
+        reportId,
+        findings,
+        impression,
+        fileUrl: reportObj.file_url,
+        fileName: reportObj.file_name,
+        criticalFindings: reportObj.critical_findings
+      }
+    });
+
+    saveLocalStore(store);
+
+    await auditService.recordLog({
+      user: { ...user, name: uploaderName, clinicId: resolvedClinicId },
+      action: 'COMPLETE_IPD_RADIOLOGY_REPORT',
+      resourceType: 'RadiologyOrder',
+      resourceId: orderId,
+      changes: {
+        admissionId,
+        orderId,
+        reportId,
+        impression,
+        fileUrl: reportObj.file_url
+      }
+    });
+
+    return order;
   },
 
 };

@@ -246,6 +246,60 @@ export const checkInAppointment = async (req, { params }) => {
 /**
  * Controller to fetch daily appointments for a doctor.
  */
+
+export const parseTimeSlotToMinutes = (slotStr) => {
+  if (!slotStr || typeof slotStr !== 'string') return 9999;
+  const startPart = slotStr.split('-')[0].trim();
+  const match = startPart.match(/^(\d{1,2}):(\d{2})\s*(AM|PM)?$/i);
+  if (!match) return 9999;
+  let hours = parseInt(match[1], 10);
+  const minutes = parseInt(match[2], 10);
+  const modifier = (match[3] || '').toUpperCase();
+
+  if (modifier === 'PM' && hours < 12) hours += 12;
+  if (modifier === 'AM' && hours === 12) hours = 0;
+
+  return hours * 60 + minutes;
+};
+
+export const compareDoctorAppointments = (a, b) => {
+  // 1. Emergency prioritization: Emergency patients always come first
+  if (a.is_emergency && !b.is_emergency) return -1;
+  if (!a.is_emergency && b.is_emergency) return 1;
+
+  // 2. Appointment status lifecycle ordering
+  const statusRank = {
+    in_progress: 1,
+    checked_in: 2,
+    checkedIn: 2,
+    booked: 3,
+    scheduled: 3,
+    pending: 3,
+    completed: 4,
+    cancelled: 5
+  };
+  const rankA = statusRank[a.status] || 99;
+  const rankB = statusRank[b.status] || 99;
+  if (rankA !== rankB) return rankA - rankB;
+
+  // 3. For checked_in / in_progress patients: if clinic issued queue_number exists, order by it
+  if (rankA <= 2 && a.queue_number && b.queue_number && a.queue_number !== b.queue_number) {
+    return a.queue_number - b.queue_number;
+  }
+
+  // 4. Chronological time-slot ordering (using parseTimeSlotToMinutes)
+  const timeA = parseTimeSlotToMinutes(a.time_slot);
+  const timeB = parseTimeSlotToMinutes(b.time_slot);
+  if (timeA !== timeB) return timeA - timeB;
+
+  // 5. Tie-breaker by queue_number or ID
+  const qA = a.queue_number || 9999;
+  const qB = b.queue_number || 9999;
+  if (qA !== qB) return qA - qB;
+
+  return String(a.appointment_id || a.id || '').localeCompare(String(b.appointment_id || b.id || ''));
+};
+
 export const getDoctorDailyAppointments = async (req) => {
   
 
@@ -267,17 +321,28 @@ export const getDoctorDailyAppointments = async (req) => {
 
     const appointments = await appointmentService.fetchDoctorDailyAppointments(doctorId, date, clinicId);
 
-    // Filter to return only needed data as per Ticket 1 Acceptance Criteria
-    const formattedData = appointments.map(app => ({
-      appointment_id: app._id,
-      patient_name: app.patientId ? `${app.patientId.first_name || ''} ${app.patientId.last_name || ''}`.trim() : 'Unknown Patient',
-      patient_id: app.patientId?._id,
-      patient_code: app.patientId?.patient_code || 'N/A',
-      time_slot: app.time_slot,
-      status: app.status,
-      queue_number: app.queue_number || null,
-      is_emergency: app.is_emergency || false
-    }));
+    // Sort appointments with consistent business rules (emergency -> status -> time slot)
+    const sorted = [...appointments].sort(compareDoctorAppointments);
+
+    // Assign sequential queue numbers to guarantee continuous sequence without skips or duplicates
+    const formattedData = sorted.map((app, idx) => {
+      const pObj = (typeof app.patientId === 'object' && app.patientId) ? app.patientId : (app.patients || {});
+      const fullName = `${pObj.first_name || ''} ${pObj.last_name || ''}`.trim();
+      const patient_name = fullName || app.patient_name || app.patientName || 'Unknown Patient';
+      const patient_code = pObj.patient_code || app.patient_code || (app.patient_id ? `#${String(app.patient_id).slice(-6)}` : 'N/A');
+
+      return {
+        appointment_id: app._id || app.id,
+        patient_name,
+        patient_id: app.patientId?._id || app.patient_id || pObj.id,
+        patient_code,
+        time_slot: app.time_slot || 'Regular',
+        status: app.status || 'scheduled',
+        queue_number: idx + 1,
+        raw_queue_number: app.queue_number || null,
+        is_emergency: !!app.is_emergency
+      };
+    });
 
     return ApiResponse.success(
       formattedData,

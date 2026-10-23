@@ -18,6 +18,10 @@ export const PUT = withErrorHandler(
       return ApiResponse.error('Clinic ID is required', 'MISSING_FIELD', [], 400);
     }
 
+    if (req.user?.clinicId && clinicId && String(req.user.clinicId) !== String(clinicId)) {
+      return ApiResponse.error('Forbidden: Cross-clinic access prohibited', 'CROSS_CLINIC_FORBIDDEN', [], 403);
+    }
+
     try {
       const result = await ipdService.dischargePatient(clinicId, req.user, id, body);
       return ApiResponse.success({ result, billing: result.billing }, 'Patient discharged successfully');

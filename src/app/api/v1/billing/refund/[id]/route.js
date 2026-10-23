@@ -46,8 +46,7 @@ import * as billingController from '@/controllers/billingController';
  *         description: Invoice not found
  */
 export const PUT = withErrorHandler(
-  withRoles(['admin', 'receptionist'], async (req, { params }) => {
-    const context = { params: { id: params.id } };
+  withRoles(['admin', 'receptionist', 'clinic'], async (req, context) => {
     return await billingController.processRefund(req, context);
   })
 );

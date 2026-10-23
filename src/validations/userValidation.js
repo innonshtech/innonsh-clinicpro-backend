@@ -1,4 +1,3 @@
-
 export const INTAKE_CATEGORIES = [
   'Oral fluids',
   'IV fluids',
@@ -210,7 +209,10 @@ export const patientRegistrationSchema = z.object({
   emergencyContact: optionalPhoneSchema,
   password: z.string()
     .min(8, 'Password must be at least 8 characters long')
-    .regex(/^(?=.*[a-z])(?=.*[A-Z])(?=.*\d)(?=.*[@$!%*?&])[A-Za-z\d@$!%*?&]{8,}$/, 'Password must contain at least one uppercase letter, one lowercase letter, one number, and one special character'),
+    .regex(/^(?=.*[a-z])(?=.*[A-Z])(?=.*\d)(?=.*[@$!%*?&])[A-Za-z\d@$!%*?&]{8,}$/, 'Password must contain at least one uppercase letter, one lowercase letter, one number, and one special character')
+    .optional()
+    .nullable()
+    .or(z.literal('')),
   address: z.string().optional().nullable().or(z.literal('')),
   city: z.string().optional().nullable().or(z.literal('')),
   state: z.string().optional().nullable().or(z.literal('')),
@@ -813,4 +815,89 @@ export const vitalsScheduleSchema = z.object({
   frequency: z.enum(['none', '1h', '2h', '4h', '6h', '8h', '12h', '24h']).nullable().optional(),
   frequencyHours: z.number().int().positive().nullable().optional(),
   notes: z.string().max(255).optional().nullable()
+});
+
+export const ipdPrescriptionSchema = z.object({
+  medication_name: z.string().trim().min(1, 'Medication name is required'),
+  dosage: z.string().trim().min(1, 'Prescribed dosage is required'),
+  route: z.string().trim().min(1, 'Route of administration is required'),
+  frequency: z.string().trim().min(1, 'Frequency is required'),
+  schedule: z.union([z.array(z.string()), z.string()]).optional().nullable(),
+  instructions: z.string().optional().nullable(),
+  duration: z.string().optional().nullable(),
+  start_date: z.string().optional().nullable(),
+  end_date: z.string().optional().nullable(),
+  clinicId: z.string().optional().nullable(),
+});
+
+export const marRecordSchema = z.object({
+  prescription_id: z.string().trim().min(1, 'Prescription ID is required'),
+  status: z.enum(['ADMINISTERED', 'MISSED', 'REFUSED'], {
+    errorMap: () => ({ message: 'Status must be ADMINISTERED, MISSED, or REFUSED' })
+  }),
+  scheduled_time: z.string().optional().nullable(),
+  administered_at: z.string().optional().nullable(),
+  dose_given: z.string().optional().nullable(),
+  route: z.string().optional().nullable(),
+  reason: z.string().optional().nullable(),
+  notes: z.string().optional().nullable(),
+  remarks: z.string().optional().nullable(),
+  clinicId: z.string().optional().nullable(),
+}).superRefine((data, ctx) => {
+  if ((data.status === 'MISSED' || data.status === 'REFUSED') && (!data.reason || data.reason.trim().length < 3)) {
+    ctx.addIssue({
+      code: z.ZodIssueCode.custom,
+      message: 'A mandatory clinical reason is required when recording a dose as ' + data.status + '.',
+      path: ['reason']
+    });
+  }
+});
+
+export const discontinuePrescriptionSchema = z.object({
+  reason: z.string().trim().min(3, 'A clinical reason is mandatory to discontinue medication (minimum 3 characters).'),
+  discontinuation_reason: z.string().optional().nullable(),
+  discontinued_at: z.string().optional().nullable(),
+  clinicId: z.string().optional().nullable(),
+});
+
+
+export const createRadiologyOrderSchema = z.object({
+  lab_id: z.string().trim().min(1, 'Destination laboratory is required.').optional().or(z.literal('')),
+  labId: z.string().trim().min(1, 'Destination laboratory is required.').optional().or(z.literal('')),
+  lab_name: z.string().optional().nullable(),
+  labName: z.string().optional().nullable(),
+  investigation_type: z.enum(['X-Ray', 'CT Scan', 'Ultrasound', 'MRI', 'Other'], {
+    errorMap: () => ({ message: 'Investigation type must be X-Ray, CT Scan, Ultrasound, MRI, or Other' })
+  }),
+  study_name: z.string().trim().min(2, 'Study name is required (minimum 2 characters).'),
+  clinical_indication: z.string().trim().min(3, 'A clinical indication is mandatory (minimum 3 characters).'),
+  priority: z.enum(['routine', 'urgent', 'critical_stat']).optional().default('routine'),
+  instructions: z.string().optional().nullable(),
+  transport_mode: z.string().optional().nullable(),
+  clinicId: z.string().optional().nullable(),
+  price: z.number().nonnegative().optional().nullable(),
+  amount: z.number().nonnegative().optional().nullable(),
+  tariff: z.number().nonnegative().optional().nullable(),
+  total_amount: z.number().nonnegative().optional().nullable()
+});
+
+export const updateRadiologyStatusSchema = z.object({
+  status: z.enum(['ORDERED', 'IN_PROGRESS', 'COMPLETED', 'CANCELLED'], {
+    errorMap: () => ({ message: 'Status must be ORDERED, IN_PROGRESS, COMPLETED, or CANCELLED' })
+  }),
+  reason: z.string().optional().nullable(),
+  notes: z.string().optional().nullable(),
+  clinicId: z.string().optional().nullable(),
+});
+
+export const attachRadiologyReportSchema = z.object({
+  findings: z.string().trim().min(3, 'Diagnostic findings are required (minimum 3 characters).'),
+  impression: z.string().trim().min(3, 'Diagnostic impression is required (minimum 3 characters).'),
+  file_url: z.string().optional().nullable(),
+  file_name: z.string().optional().nullable(),
+  file_size: z.number().optional().nullable(),
+  mime_type: z.string().optional().nullable(),
+  recommendations: z.string().optional().nullable(),
+  critical_findings: z.boolean().optional().default(false),
+  clinicId: z.string().optional().nullable(),
 });

@@ -173,7 +173,7 @@ export const getAppointmentList = async (queryParams, user) => {
 
   let req = supabase.from('appointments').select(`
     *,
-    patients (first_name, last_name, phone_number, id),
+    patients (first_name, last_name, phone_number, id, patient_code),
     doctors (first_name, last_name, specialty)
   `, { count: 'exact' });
 

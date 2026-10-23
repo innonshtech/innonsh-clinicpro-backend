@@ -24,6 +24,7 @@ const ALLOWED_CLINIC_COLUMNS = new Set([
   'gst_document_url',
   'is_24x7',
   'opening_hours',
+  'modules',
   'updated_at'
 ]);
 
@@ -98,6 +99,10 @@ export async function PUT(req, { params }) {
       mappedUpdates.gst_document_url = body.gstDocumentUrl || body.gst_document_url;
     }
 
+    if (mappedUpdates.modules === undefined && body.modules !== undefined) {
+      mappedUpdates.modules = body.modules;
+    }
+
     // Filter to ONLY allowed columns in clinics table
     const safePayload = {};
     for (const [key, value] of Object.entries(mappedUpdates)) {
@@ -110,6 +115,18 @@ export async function PUT(req, { params }) {
     safePayload.updated_at = new Date().toISOString();
 
     console.log('[Clinic Update] Target ID:', id, 'Payload keys:', Object.keys(safePayload));
+
+    // Enforce 10-digit Indian phone number validation
+    if (safePayload.phone !== undefined) {
+      const cleanPhone = String(safePayload.phone).replace(/\D/g, '');
+      if (cleanPhone && cleanPhone.length !== 10) {
+        return ApiResponse.error('Indian phone number must be exactly 10 digits', 'INVALID_PHONE_NUMBER', [], 400);
+      }
+      if (cleanPhone && !/^[6-9]\d{9}$/.test(cleanPhone)) {
+        return ApiResponse.error('Please enter a valid 10-digit Indian phone number starting with 6, 7, 8, or 9', 'INVALID_PHONE_NUMBER', [], 400);
+      }
+      safePayload.phone = cleanPhone;
+    }
 
     if (Object.keys(safePayload).length === 0) {
       return ApiResponse.error(
@@ -149,6 +166,7 @@ export async function PUT(req, { params }) {
     safeClinic.licenseDocumentUrl = safeClinic.license_document_url || safeClinic.license_document;
     safeClinic.gstDocumentUrl = safeClinic.gst_document_url || safeClinic.gst_document;
     safeClinic.contactEmail = safeClinic.email;
+    safeClinic.modules = updatedClinic.modules || { lab: true, ipd: false };
 
     return ApiResponse.success({ clinic: safeClinic }, 'Clinic updated successfully');
   } catch (error) {

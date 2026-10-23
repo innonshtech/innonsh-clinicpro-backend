@@ -16,19 +16,58 @@ const ALLOWED_ORIGINS = (process.env.ALLOWED_ORIGINS || 'http://localhost:3000,h
   .map((o) => o.trim());
 
 const CORS_METHODS = 'GET,POST,PUT,PATCH,DELETE,OPTIONS';
-const CORS_HEADERS = 'Content-Type,Authorization';
+const DEFAULT_CORS_HEADERS = 'Content-Type,Authorization,X-Requested-With,Accept,Origin';
 
-function setCors(response, origin) {
-  // Allow any origin to bypass strict CORS checks
-  if (origin) {
+function isOriginAllowed(origin) {
+  if (!origin) return false;
+  if (ALLOWED_ORIGINS.includes('*') || ALLOWED_ORIGINS.includes(origin)) return true;
+
+  try {
+    const url = new URL(origin);
+    if (url.hostname === 'localhost' || url.hostname === '127.0.0.1') {
+      const altHost = url.hostname === 'localhost' ? '127.0.0.1' : 'localhost';
+      const altOrigin = `${url.protocol}//${altHost}${url.port ? ':' + url.port : ''}`;
+      if (ALLOWED_ORIGINS.includes(altOrigin)) return true;
+    }
+  } catch (_) {}
+
+  return false;
+}
+
+function setCors(response, requestOrOrigin) {
+  const origin = typeof requestOrOrigin === 'string'
+    ? requestOrOrigin
+    : requestOrOrigin?.headers?.get('origin');
+  const req = typeof requestOrOrigin === 'object' && requestOrOrigin !== null
+    ? requestOrOrigin
+    : null;
+
+  if (origin && isOriginAllowed(origin)) {
     response.headers.set('Access-Control-Allow-Origin', origin);
     response.headers.set('Access-Control-Allow-Credentials', 'true');
-  } else {
-    response.headers.set('Access-Control-Allow-Origin', '*');
   }
-  
+
   response.headers.set('Access-Control-Allow-Methods', CORS_METHODS);
-  response.headers.set('Access-Control-Allow-Headers', CORS_HEADERS);
+
+  const requestedHeaders = req?.headers?.get('access-control-request-headers');
+  if (requestedHeaders) {
+    const headerSet = new Set(
+      DEFAULT_CORS_HEADERS.split(',').map((h) => h.trim()).concat(
+        requestedHeaders.split(',').map((h) => h.trim())
+      )
+    );
+    response.headers.set('Access-Control-Allow-Headers', Array.from(headerSet).join(', '));
+  } else {
+    response.headers.set('Access-Control-Allow-Headers', DEFAULT_CORS_HEADERS);
+  }
+
+  if (req?.headers?.get('access-control-request-private-network') === 'true') {
+    response.headers.set('Access-Control-Allow-Private-Network', 'true');
+  }
+
+  response.headers.set('Access-Control-Max-Age', '86400');
+  response.headers.set('Vary', 'Origin, Access-Control-Request-Headers, Access-Control-Request-Method');
+
   return response;
 }
 
@@ -70,7 +109,7 @@ const ROLE_PATHS = {
   '/api/v1/clinic/fetchprofiledata': ['doctor', 'clinic', 'receptionist', 'admin', 'nurse'],
   '/api/v1/clinic/fetch-patients': ['doctor', 'clinic', 'receptionist', 'admin'],
   '/api/v1/clinic/nurses': ['doctor', 'clinic', 'admin', 'nurse', 'receptionist'],
-  '/api/v1/ipd': ['doctor', 'clinic', 'admin', 'nurse', 'receptionist'],
+  '/api/v1/ipd': ['doctor', 'clinic', 'admin', 'nurse', 'receptionist', 'housekeeping', 'lab'],
   '/api/v1/clinic': ['clinic', 'receptionist', 'admin'],
   '/api/v1/receptionist': ['receptionist', 'clinic', 'admin'],
   '/api/v1/patient/register': ['receptionist'],
@@ -88,7 +127,7 @@ export async function middleware(request) {
 
   if (request.method === 'OPTIONS') {
     const response = new NextResponse(null, { status: 204 });
-    setCors(response, origin);
+    setCors(response, request);
     return response;
   }
 
@@ -118,19 +157,21 @@ export async function middleware(request) {
     );
     
     Object.entries(headers).forEach(([key, value]) => response.headers.set(key, value));
-    setCors(response, origin);
+    setCors(response, request);
     return response;
   }
 
   // Centralized RBAC Authorization
-  const isPublicPath = PUBLIC_PATHS.some(publicPath => path.includes(publicPath));
+  const isPublicPath = !path.startsWith('/api/v1/ipd') && PUBLIC_PATHS.some(publicPath => {
+    return path === publicPath || path.startsWith(publicPath + '/') || (publicPath.startsWith('/api/') && path.startsWith(publicPath));
+  });
   let decodedUser = null;
 
   if (!isPublicPath) {
     const authHeader = request.headers.get('authorization');
     if (!authHeader || !authHeader.startsWith('Bearer ')) {
       const response = NextResponse.json({ success: false, message: 'Missing or invalid authorization header', errorCode: 'MISSING_TOKEN' }, { status: 401 });
-      setCors(response, origin);
+      setCors(response, request);
       return response;
     }
 
@@ -148,13 +189,13 @@ export async function middleware(request) {
       decodedUser = payload;
     } catch (error) {
       const response = NextResponse.json({ success: false, message: 'Token verification failed or expired', errorCode: 'INVALID_TOKEN' }, { status: 401 });
-      setCors(response, origin);
+      setCors(response, request);
       return response;
     }
 
     if (!decodedUser || !decodedUser.role) {
       const response = NextResponse.json({ success: false, message: 'User role is undefined', errorCode: 'UNDEFINED_ROLE' }, { status: 403 });
-      setCors(response, origin);
+      setCors(response, request);
       return response;
     }
 
@@ -177,7 +218,7 @@ export async function middleware(request) {
           errorCode: 'FORBIDDEN',
           yourRole: decodedUser.role
         }, { status: 403 });
-        setCors(response, origin);
+        setCors(response, request);
         return response;
       }
     }
@@ -199,6 +240,9 @@ export async function middleware(request) {
     if (decodedUser.labRole) {
       requestHeaders.set('x-lab-role', decodedUser.labRole.toString());
     }
+    if (decodedUser.permissions && Array.isArray(decodedUser.permissions)) {
+      requestHeaders.set('x-lab-permissions', JSON.stringify(decodedUser.permissions));
+    }
   }
 
   const response = NextResponse.next({
@@ -207,7 +251,7 @@ export async function middleware(request) {
     },
   });
   
-  setCors(response, origin);
+  setCors(response, request);
   
   const successHeaders = getRateLimitHeaders(rateLimitResult);
   Object.entries(successHeaders).forEach(([key, value]) => response.headers.set(key, value));

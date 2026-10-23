@@ -22,7 +22,7 @@ export async function GET() {
   try {
     const { data: clinicsData, error } = await supabase
       .from('clinics')
-      .select('id, clinic_name, email, phone, address, city, clinic_type, status, registration_number, created_at, updated_at, images, logo');
+      .select('id, clinic_name, email, phone, address, city, clinic_type, status, registration_number, created_at, updated_at, images, logo, modules');
 
     if (error) throw error;
 
@@ -36,7 +36,8 @@ export async function GET() {
       imageUrls: clinic.images,
       logo: clinic.logo || null,
       createdAt: clinic.created_at,
-      updatedAt: clinic.updated_at
+      updatedAt: clinic.updated_at,
+      modules: clinic.modules || { lab: true, ipd: false }
     }));
 
     return ApiResponse.success({ clinics }, 'Clinics fetched successfully');

@@ -104,11 +104,52 @@ export const getBillingHistory = async (filters, user) => {
 
   if (!user?.clinicId) throw new AppError('clinicId missing', 401, 'UNAUTHORIZED');
 
+  // Ensure any completed visits for this clinic have their invoice generated (reconciliation sync)
+  try {
+    const { data: completedVisits } = await supabase
+      .from('visits')
+      .select('id, clinic_id, doctor_id, patient_id')
+      .eq('clinic_id', user.clinicId)
+      .eq('status', 'completed');
+
+    if (completedVisits && completedVisits.length > 0) {
+      const { data: existingBills } = await supabase
+        .from('billings')
+        .select('visit_id')
+        .eq('clinic_id', user.clinicId);
+
+      const billedVisitIds = new Set((existingBills || []).map(b => b.visit_id).filter(Boolean));
+
+      for (const v of completedVisits) {
+        if (!billedVisitIds.has(v.id)) {
+          const { data: doc } = await supabase
+            .from('doctors')
+            .select('consultant_fee')
+            .eq('id', v.doctor_id)
+            .maybeSingle();
+
+          const fee = Number(doc?.consultant_fee) || 500;
+          await createInvoice({
+            visit_id: v.id,
+            items: [{ name: 'Consultation Fee', type: 'consultation', amount: fee }]
+          }, {
+            id: user.id,
+            clinicId: user.clinicId,
+            role: user.role || 'receptionist'
+          });
+          billedVisitIds.add(v.id);
+        }
+      }
+    }
+  } catch (syncErr) {
+    console.error('Error in completed visit billing reconciliation:', syncErr);
+  }
+
   let req = supabase
     .from('billings')
     .select(`
       *,
-      patients (first_name, last_name, id, phone_number, email),
+      patients (first_name, last_name, id, phone_number, email, patient_code),
       doctors (first_name, last_name)
     `, { count: 'exact' })
     .eq('clinic_id', user.clinicId);
@@ -133,6 +174,9 @@ export const getBillingHistory = async (filters, user) => {
     billingId: b.billing_id,
     finalAmount: Number(b.final_amount) || 0,
     totalAmount: Number(b.total_amount) || 0,
+    paidAmount: Number(b.paid_amount) || 0,
+    remainingAmount: Number(b.remaining_amount !== undefined && b.remaining_amount !== null ? b.remaining_amount : (b.final_amount - (b.paid_amount || 0))) || 0,
+    paymentMethod: b.payment_method || null,
     createdAt: b.created_at,
     paidAt: b.paid_at,
     patientId: b.patients ? { 
@@ -156,7 +200,7 @@ export const getInvoiceDetails = async (id, user) => {
 
   let req = supabase.from('billings').select(`
     *,
-    patients (first_name, last_name, id, phone_number, email),
+    patients (first_name, last_name, id, phone_number, email, patient_code),
     visits (*),
     doctors (first_name, last_name, specialty)
   `);

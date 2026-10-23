@@ -4,7 +4,7 @@ import { withRoles } from '@/utils/authGuard';
 import { ipdService } from '@/services/ipdService';
 
 export const GET = withErrorHandler(
-  withRoles(['clinic', 'admin', 'doctor'], async (req) => {
+  withRoles(['clinic', 'admin', 'doctor', 'nurse', 'housekeeping'], async (req) => {
     const { searchParams } = new URL(req.url);
     const clinicId = searchParams.get('clinicId') || req.user?.clinicId;
 

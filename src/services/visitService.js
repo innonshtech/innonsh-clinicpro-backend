@@ -1,3 +1,4 @@
+import * as billingService from '@/services/billingService';
 /**
  * visitService.js - Migrated from Mongoose to Supabase.
  * All business logic is preserved.
@@ -28,11 +29,14 @@ export const startVisit = async (payload, user) => {
   if (apptError) throw apptError;
   if (!appointment) throw new AppError('Appointment not found or details mismatch', 404, 'NOT_FOUND');
 
-  if (!['checked_in', 'in_progress'].includes(appointment.status)) {
+  const allowedStatuses = ['checked_in', 'checkedIn', 'in_progress', 'booked', 'scheduled', 'confirmed'];
+  const currentStatus = (appointment.status || '').toLowerCase().replace(/[-_]/g, '');
+  const isStatusAllowed = allowedStatuses.some(s => s.toLowerCase().replace(/[-_]/g, '') === currentStatus);
+  if (!isStatusAllowed) {
     throw new AppError(`Cannot start consultation. Appointment status is ${appointment.status}`, 400, 'INVALID_STATUS');
   }
 
-  // 2. Check for duplicate Visit
+  // 2. Check for duplicate Visit (or existing session to resume safely)
   const { data: existingVisit } = await supabase
     .from('visits')
     .select('*')
@@ -40,11 +44,11 @@ export const startVisit = async (payload, user) => {
     .maybeSingle();
 
   if (existingVisit) {
-    if (appointment.status === 'in_progress') {
-      existingVisit._id = existingVisit.id;
-      return existingVisit;
+    existingVisit._id = existingVisit.id;
+    if (appointment.status !== 'in_progress') {
+      await supabase.from('appointments').update({ status: 'in_progress' }).eq('id', appointment.id);
     }
-    throw new AppError('Visit already exists for this appointment', 409, 'DUPLICATE_ENTRY');
+    return existingVisit;
   }
 
   // 3. Create Visit
@@ -124,6 +128,35 @@ export const finishVisit = async (visitId, user, payload = {}) => {
       followUpDate: updatedVisit.follow_up_date,
       followUpNotes: updatedVisit.follow_up_notes,
     }, user);
+  }
+
+  // Auto-generate invoice for completed visit (exactly once, duplicate safe)
+  try {
+    const { data: existingBill } = await supabase
+      .from('billings')
+      .select('id')
+      .eq('visit_id', updatedVisit.id)
+      .maybeSingle();
+
+    if (!existingBill) {
+      const { data: doc } = await supabase
+        .from('doctors')
+        .select('consultant_fee')
+        .eq('id', updatedVisit.doctor_id)
+        .maybeSingle();
+
+      const fee = Number(doc?.consultant_fee) || 500;
+      await billingService.createInvoice({
+        visit_id: updatedVisit.id,
+        items: [{ name: 'Consultation Fee', type: 'consultation', amount: fee }]
+      }, {
+        id: user.id,
+        clinicId: updatedVisit.clinic_id,
+        role: user.role
+      });
+    }
+  } catch (invErr) {
+    console.error('Auto-invoice creation error on visit completion:', invErr);
   }
 
   updatedVisit._id = updatedVisit.id;

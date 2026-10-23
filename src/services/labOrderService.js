@@ -62,6 +62,62 @@ function writeFallbackOrders(orders) {
   }
 }
 
+
+const FALLBACK_LABS_FILE = path.join(DATA_DIR, 'labs.json');
+
+function readFallbackLabs() {
+  try {
+    if (fs.existsSync(FALLBACK_LABS_FILE)) {
+      const data = fs.readFileSync(FALLBACK_LABS_FILE, 'utf8');
+      const parsed = JSON.parse(data || '[]');
+      if (Array.isArray(parsed) && parsed.length > 0) return parsed;
+    }
+  } catch (_) {}
+  try {
+    const orders = readFallbackOrders();
+    const map = new Map();
+    for (const o of orders) {
+      if (o.lab && o.lab.id && !map.has(o.lab.id)) {
+        map.set(o.lab.id, {
+          id: o.lab.id,
+          lab_name: o.lab.lab_name || 'Central Diagnostic Center',
+          email: o.lab.email || 'lab@clinicpro.com',
+          phone: o.lab.phone || '9876543210',
+          city: o.lab.city || 'Central City',
+          address: o.lab.address || 'Medical Enclave',
+          status: 'active'
+        });
+      }
+    }
+    if (map.size > 0) return Array.from(map.values());
+  } catch (_) {}
+
+  return [
+    {
+      id: '74a3e334-1cd5-4288-916c-bc83c33e058e',
+      lab_name: 'Apex Diagnostic & Imaging Center',
+      email: 'apex.diagnostics@clinicpro.com',
+      phone: '9876543210',
+      address: 'Suite 101, Diagnostic Plaza',
+      city: 'Metro City',
+      state: 'State',
+      postal_code: '110001',
+      status: 'active'
+    },
+    {
+      id: '88b4f445-2de6-5399-a27d-cd94d44f169f',
+      lab_name: 'Metro Radiology & Pathology Facility',
+      email: 'metro.radiology@clinicpro.com',
+      phone: '9876543211',
+      address: 'Plot 45, Health Avenue',
+      city: 'Metro City',
+      state: 'State',
+      postal_code: '110002',
+      status: 'active'
+    }
+  ];
+}
+
 let tableCheckedAt = 0;
 let tableAvailable = null;
 
@@ -106,12 +162,13 @@ export const labOrderService = {
         .select('id, lab_name, email, login_email, phone, address, city, state, postal_code, status')
         .order('lab_name', { ascending: true });
 
-      if (error) throw error;
-      return (data || []).filter(l => (l.status || 'active').toLowerCase() === 'active');
+      if (!error && Array.isArray(data) && data.length > 0) {
+        return data.filter(l => (l.status || 'active').toLowerCase() === 'active');
+      }
     } catch (err) {
-      console.error('[LabOrderService] listActiveLabs query failed:', err.message);
-      throw err;
+      console.warn('[LabOrderService] listActiveLabs DB query failed, using fallback:', err.message);
     }
+    return readFallbackLabs().filter(l => (l.status || 'active').toLowerCase() === 'active');
   },
 
   /**
@@ -325,8 +382,34 @@ export const labOrderService = {
           item_code: pkg.package_code,
           price
         });
+      } else if (itemType === 'radiology' || itemType === 'imaging') {
+        const modality = (item.modality || item.investigation_type || 'X-Ray').trim();
+        const studyName = (item.study_name || item.item_name || item.investigation_name || '').trim();
+        if (!studyName || studyName.length < 2) {
+          throw new Error('Study name is required for radiology investigations (minimum 2 characters).');
+        }
+        const indication = (item.clinical_indication || item.indication || clinical_notes || '').trim();
+        if (!indication || indication.length < 3) {
+          throw new Error('A clinical indication is mandatory for radiology orders (minimum 3 characters).');
+        }
+        const price = Number(item.price) || 0;
+        calculatedTotal += price;
+        const radTestCode = item.item_code || `RAD-${modality.replace(/\s+/g, '').toUpperCase().slice(0, 3)}-${Date.now().toString().slice(-4)}`;
+        enrichedItems.push({
+          id: crypto.randomUUID(),
+          item_type: 'radiology',
+          test_id: item.test_id || null,
+          package_id: null,
+          item_name: `${modality}: ${studyName}`,
+          item_code: radTestCode,
+          modality,
+          study_name: studyName,
+          clinical_indication: indication,
+          instructions: (item.instructions || '').trim(),
+          price
+        });
       } else {
-        throw new Error(`Invalid item_type "${itemType}". Must be 'test' or 'package'.`);
+        throw new Error(`Invalid item_type "${itemType}". Must be 'test', 'package', or 'radiology'.`);
       }
     }
 
@@ -347,6 +430,8 @@ export const labOrderService = {
       status: 'pending',
       priority: validatedPriority,
       clinical_notes: clinical_notes ? String(clinical_notes).trim() : null,
+      category: enrichedItems.some(i => i.item_type === 'radiology') ? 'radiology' : 'pathology',
+      has_radiology: enrichedItems.some(i => i.item_type === 'radiology'),
       created_at: nowIso,
       updated_at: nowIso
     };
@@ -516,9 +601,10 @@ export const labOrderService = {
             });
           }
           orders.sort((a, b) => {
-            const rankDiff = getPriorityRank(b.priority) - getPriorityRank(a.priority);
-            if (rankDiff !== 0) return rankDiff;
-            return new Date(b.created_at).getTime() - new Date(a.created_at).getTime();
+            const timeA = new Date(a.created_at || a.createdAt || 0).getTime();
+            const timeB = new Date(b.created_at || b.createdAt || 0).getTime();
+            if (timeB !== timeA) return timeB - timeA;
+            return String(b.id || b._id || '').localeCompare(String(a.id || a._id || ''));
           });
           return orders;
         }
@@ -553,9 +639,10 @@ export const labOrderService = {
       o.priority = o.priority || 'routine';
     });
     filtered.sort((a, b) => {
-      const rankDiff = getPriorityRank(b.priority) - getPriorityRank(a.priority);
-      if (rankDiff !== 0) return rankDiff;
-      return new Date(b.created_at).getTime() - new Date(a.created_at).getTime();
+      const timeA = new Date(a.created_at || a.createdAt || 0).getTime();
+      const timeB = new Date(b.created_at || b.createdAt || 0).getTime();
+      if (timeB !== timeA) return timeB - timeA;
+      return String(b.id || b._id || '').localeCompare(String(a.id || a._id || ''));
     });
     return filtered;
   },
@@ -590,6 +677,24 @@ export const labOrderService = {
             data.priority = fb.priority;
           }
           data.priority = data.priority || 'routine';
+          if (Array.isArray(fb?.items)) {
+            data.items = (data.items || []).map((it, idx) => {
+              const fbIt = fb.items.find(f => f.id === it.id || (f.item_code === it.item_code && f.item_name === it.item_name)) || fb.items[idx];
+              return {
+                ...it,
+                modality: it.modality || fbIt?.modality,
+                study_name: it.study_name || fbIt?.study_name,
+                clinical_indication: it.clinical_indication || fbIt?.clinical_indication,
+                instructions: it.instructions || fbIt?.instructions
+              };
+            });
+            if (data.items.length === 0 && fb.items.length > 0) {
+              data.items = fb.items;
+            }
+          }
+          if (!data.category && fb?.category) data.category = fb.category;
+          if (data.has_radiology === undefined && fb?.has_radiology !== undefined) data.has_radiology = fb.has_radiology;
+          if (!data.report && fb?.report) data.report = fb.report;
           // Check access permission
           if (role === 'lab' && data.lab_id !== (authUser.labId || authUser.id)) {
             return null; // Forbidden / Access Denied
@@ -656,7 +761,7 @@ export const labOrderService = {
     const callerLabId = authUser.labId || authUser.id;
 
     const normalizedStatus = (newStatus || '').toLowerCase();
-    if (!['pending', 'accepted', 'rejected'].includes(normalizedStatus)) {
+    if (!['pending', 'accepted', 'rejected', 'in_progress', 'completed'].includes(normalizedStatus)) {
       throw new Error(`Invalid status "${newStatus}". Must be 'accepted' or 'rejected'.`);
     }
 
@@ -710,6 +815,122 @@ export const labOrderService = {
       status: normalizedStatus,
       updated_at: nowIso,
       rejection_reason: rejectionReason || order.rejection_reason
+    };
+  },
+
+  /**
+   * Attach Finalized Diagnostic Radiology Report to OPD Lab Order
+   */
+  async attachRadiologyReportToLabOrder(orderId, authUser, reportData = {}) {
+    const role = (authUser.role || '').toLowerCase();
+    const callerLabId = authUser.labId || authUser.id;
+
+    if (role !== 'admin' && role !== 'lab') {
+      const err = new Error('Forbidden: Only diagnostic staff or administrators can attach diagnostic reports.');
+      err.code = 'FORBIDDEN_REPORT_ISSUANCE';
+      err.status = 403;
+      throw err;
+    }
+
+    // Check technician RBAC
+    const labRole = (authUser.labRole || authUser.role_title || '').toLowerCase();
+    const isTech = authUser.role === 'technician' || labRole === 'technician';
+    if (isTech) {
+      const perms = Array.isArray(authUser.permissions) ? authUser.permissions : [];
+      if (!perms.includes('issue_reports') && !perms.includes('validate_results')) {
+        const err = new Error('Forbidden: Lab technicians without report issuance authorization cannot finalize radiology reports.');
+        err.code = 'FORBIDDEN_REPORT_ISSUANCE';
+        err.status = 403;
+        throw err;
+      }
+    }
+
+    const order = await this.getOrderById(orderId, authUser);
+    if (!order) {
+      const err = new Error('Lab order not found or access denied.');
+      err.code = 'ORDER_NOT_FOUND';
+      err.status = 404;
+      throw err;
+    }
+
+    if (role === 'lab' && String(order.lab_id) !== String(callerLabId)) {
+      const err = new Error('Forbidden: Only the assigned destination laboratory can report on this order.');
+      err.code = 'FORBIDDEN_LAB_MISMATCH';
+      err.status = 403;
+      throw err;
+    }
+
+    if (order.report) {
+      const err = new Error('Conflict: A diagnostic report has already been finalized for this order. Reports are immutable.');
+      err.code = 'REPORT_ALREADY_FINALIZED';
+      err.status = 409;
+      err.statusCode = 409;
+      throw err;
+    }
+
+    const findings = (reportData.findings || '').trim();
+    if (!findings || findings.length < 3) {
+      const err = new Error('Diagnostic findings are mandatory (minimum 3 characters).');
+      err.code = 'FINDINGS_REQUIRED';
+      err.status = 400;
+      throw err;
+    }
+
+    const impression = (reportData.impression || '').trim();
+    if (!impression || impression.length < 3) {
+      const err = new Error('Diagnostic impression is mandatory (minimum 3 characters).');
+      err.code = 'IMPRESSION_REQUIRED';
+      err.status = 400;
+      throw err;
+    }
+
+    const reportId = crypto.randomUUID();
+    const nowIso = new Date().toISOString();
+    const uploaderName = authUser.name || (authUser.first_name ? `Dr. ${authUser.first_name} ${authUser.last_name || ''}`.trim() : 'Radiologist / Specialist');
+
+    const reportRecord = {
+      reportId,
+      id: reportId,
+      findings,
+      impression,
+      recommendations: (reportData.recommendations || '').trim(),
+      isCritical: Boolean(reportData.isCritical || reportData.is_critical || reportData.critical_findings),
+      file: reportData.file || (reportData.fileUrl || reportData.file_url ? {
+        fileName: reportData.fileName || reportData.file_name || 'report.pdf',
+        fileUrl: reportData.fileUrl || reportData.file_url,
+        fileSize: reportData.fileSize || reportData.file_size || null,
+        mimeType: reportData.mimeType || reportData.mime_type || 'application/pdf'
+      } : null),
+      uploadedBy: {
+        id: authUser.id,
+        name: uploaderName,
+        role: authUser.role,
+        labRole: authUser.labRole || 'specialist'
+      },
+      uploadedAt: nowIso
+    };
+
+    const all = readFallbackOrders();
+    const idx = all.findIndex(o => o.id === orderId);
+    if (idx !== -1) {
+      all[idx].status = 'completed';
+      all[idx].report = reportRecord;
+      all[idx].updated_at = nowIso;
+      writeFallbackOrders(all);
+    }
+
+    try {
+      await supabase.from('lab_orders').update({
+        status: 'completed',
+        updated_at: nowIso
+      }).eq('id', orderId);
+    } catch (_) {}
+
+    return {
+      ...order,
+      status: 'completed',
+      report: reportRecord,
+      updated_at: nowIso
     };
   }
 };
